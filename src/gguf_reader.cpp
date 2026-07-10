@@ -182,8 +182,7 @@ bool GGUFFile::open(const std::string& path) {
         }
     }
 
-    // Align to 32 bytes for tensor data start
-    offset = (offset + 31) & ~31;
+    // Tensor info starts immediately after metadata (GGUF spec - no alignment padding)
 
     // Read tensor info
     // uint64_t tensor_data_offset = offset + n_tensors_ * 48;
