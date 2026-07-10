@@ -6,6 +6,7 @@
 #include <vector>
 #include <unordered_map>
 #include <cstdint>
+#include <cstring>
 #include <cstdio>
 
 namespace forge {
@@ -136,6 +137,16 @@ private:
     std::unordered_map<std::string, GGUFTensorInfo> tensors_;
 
     // Parsing helpers
+    // memcpy-based read (safe on ARM32 where unaligned access causes SIGBUS)
+    template<typename T>
+    T read_at(size_t offset, const T& default_val = T{}) const {
+        T val = default_val;
+        if (offset + sizeof(T) <= mmap_size_) {
+            std::memcpy(&val, (uint8_t*)mmap_addr_ + offset, sizeof(T));
+        }
+        return val;
+    }
+
     template<typename T>
     const T* ptr_at(size_t offset) const {
         if (offset + sizeof(T) > mmap_size_) return nullptr;

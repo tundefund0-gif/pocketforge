@@ -111,24 +111,18 @@ bool GGUFFile::open(const std::string& path) {
 
     // Read header
     size_t offset = 0;
-    auto magic = ptr_at<uint32_t>(offset); offset += sizeof(uint32_t);
-    if (!magic || *magic != GGUF_MAGIC) {
+    auto magic = read_at<uint32_t>(offset); offset += sizeof(uint32_t);
+    if (magic != GGUF_MAGIC) {
         std::cerr << "GGUF: Invalid magic\n";
         close();
         return false;
     }
 
-    auto version_p = ptr_at<uint32_t>(offset); offset += sizeof(uint32_t);
-    if (!version_p) { close(); return false; }
-    version_ = *version_p;
+    version_ = read_at<uint32_t>(offset); offset += sizeof(uint32_t);
 
-    auto n_tensors_p = ptr_at<uint64_t>(offset); offset += sizeof(uint64_t);
-    if (!n_tensors_p) { close(); return false; }
-    n_tensors_ = *n_tensors_p;
+    n_tensors_ = read_at<uint64_t>(offset); offset += sizeof(uint64_t);
 
-    auto n_metadata_p = ptr_at<uint64_t>(offset); offset += sizeof(uint64_t);
-    if (!n_metadata_p) { close(); return false; }
-    n_metadata_ = *n_metadata_p;
+    n_metadata_ = read_at<uint64_t>(offset); offset += sizeof(uint64_t);
 
     // Read metadata KV pairs
     for (uint64_t i = 0; i < n_metadata_; i++) {
@@ -140,32 +134,25 @@ bool GGUFFile::open(const std::string& path) {
 
         switch (val_type) {
             case GGUF_TYPE_UINT8: {
-                auto v = ptr_at<uint8_t>(offset); offset += sizeof(uint8_t);
-                if (v) metadata_int_[key] = *v; break;
+                metadata_int_[key] = read_at<uint8_t>(offset); offset += sizeof(uint8_t); break;
             }
             case GGUF_TYPE_INT8: {
-                auto v = ptr_at<int8_t>(offset); offset += sizeof(int8_t);
-                if (v) metadata_int_[key] = *v; break;
+                metadata_int_[key] = read_at<int8_t>(offset); offset += sizeof(int8_t); break;
             }
             case GGUF_TYPE_UINT16: {
-                auto v = ptr_at<uint16_t>(offset); offset += sizeof(uint16_t);
-                if (v) metadata_int_[key] = *v; break;
+                metadata_int_[key] = read_at<uint16_t>(offset); offset += sizeof(uint16_t); break;
             }
             case GGUF_TYPE_INT16: {
-                auto v = ptr_at<int16_t>(offset); offset += sizeof(int16_t);
-                if (v) metadata_int_[key] = *v; break;
+                metadata_int_[key] = read_at<int16_t>(offset); offset += sizeof(int16_t); break;
             }
             case GGUF_TYPE_UINT32: {
-                auto v = ptr_at<uint32_t>(offset); offset += sizeof(uint32_t);
-                if (v) metadata_int_[key] = *v; break;
+                metadata_int_[key] = read_at<uint32_t>(offset); offset += sizeof(uint32_t); break;
             }
             case GGUF_TYPE_INT32: {
-                auto v = ptr_at<int32_t>(offset); offset += sizeof(int32_t);
-                if (v) metadata_int_[key] = *v; break;
+                metadata_int_[key] = read_at<int32_t>(offset); offset += sizeof(int32_t); break;
             }
             case GGUF_TYPE_FLOAT32: {
-                auto v = ptr_at<float>(offset); offset += sizeof(float);
-                if (v) metadata_float_[key] = *v; break;
+                metadata_float_[key] = read_at<float>(offset); offset += sizeof(float); break;
             }
             case GGUF_TYPE_BOOL: {
                 auto v = ptr_at<bool>(offset); offset += sizeof(bool);
@@ -177,11 +164,8 @@ bool GGUFFile::open(const std::string& path) {
                 break;
             }
             case GGUF_TYPE_ARRAY: {
-                auto arr_type_p = ptr_at<uint32_t>(offset); offset += sizeof(uint32_t);
-                auto arr_len_p = ptr_at<uint64_t>(offset); offset += sizeof(uint64_t);
-                if (!arr_type_p || !arr_len_p) break;
-                GGUFValueType arr_type = static_cast<GGUFValueType>(*arr_type_p);
-                uint64_t arr_len = *arr_len_p;
+                GGUFValueType arr_type = static_cast<GGUFValueType>(read_at<uint32_t>(offset)); offset += sizeof(uint32_t);
+                uint64_t arr_len = read_at<uint64_t>(offset); offset += sizeof(uint64_t);
                 for (uint64_t j = 0; j < arr_len; j++) {
                     skip_value(offset, arr_type);
                 }
@@ -192,8 +176,7 @@ bool GGUFFile::open(const std::string& path) {
                 if (v) metadata_int_[key] = (int64_t)*v; break;
             }
             case GGUF_TYPE_INT64: {
-                auto v = ptr_at<int64_t>(offset); offset += sizeof(int64_t);
-                if (v) metadata_int_[key] = *v; break;
+                metadata_int_[key] = read_at<int64_t>(offset); offset += sizeof(int64_t); break;
             }
             case GGUF_TYPE_FLOAT64: {
                 auto v = ptr_at<double>(offset); offset += sizeof(double);
@@ -213,21 +196,14 @@ bool GGUFFile::open(const std::string& path) {
         GGUFTensorInfo info;
         info.name = read_string(offset);
 
-        auto n_dims_p = ptr_at<uint32_t>(offset); offset += sizeof(uint32_t);
-        if (!n_dims_p) break;
-        info.n_dims = *n_dims_p;
-
-        auto type_p = ptr_at<uint32_t>(offset); offset += sizeof(uint32_t);
-        if (!type_p) break;
-        info.type = static_cast<GGMLType>(*type_p);
+        info.n_dims = read_at<uint32_t>(offset); offset += sizeof(uint32_t);
+        info.type = static_cast<GGMLType>(read_at<uint32_t>(offset)); offset += sizeof(uint32_t);
 
         info.dims.resize(info.n_dims);
         info.n_elems = 1;
         for (uint32_t d = 0; d < info.n_dims; d++) {
-            auto dim_p = ptr_at<uint64_t>(offset); offset += sizeof(uint64_t);
-            if (!dim_p) break;
-            info.dims[d] = *dim_p;
-            info.n_elems *= *dim_p;
+            info.dims[d] = read_at<uint64_t>(offset); offset += sizeof(uint64_t);
+            info.n_elems *= info.dims[d];
         }
 
         // Store tensor info (offset will be set when we know data start)
