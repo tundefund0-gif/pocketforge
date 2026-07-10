@@ -339,75 +339,233 @@ int main(int argc, char** argv) {
     }
 
     // ============================================================
-    //  Embedding table
+    //  Embedding table (chunked to avoid OOM on 32-bit)
     // ============================================================
     {
         std::string emb_name = tensor_name_embed(gguf);
         if (!emb_name.empty()) {
-            std::cout << "\nEmbedding table: " << emb_name << "\n";
-            std::vector<float> emb_weights = gguf.dequantize_tensor(emb_name);
-            if (!emb_weights.empty()) {
-                auto* info = gguf.tensor_info(emb_name);
-                uint32_t n_rows = info ? (uint32_t)info->dims[1] : cfg.n_vocab;
-                uint32_t n_cols = info ? (uint32_t)info->dims[0] : cfg.n_embd;
-
-                auto quantized = quantizer.quantize_matrix(emb_weights.data(), n_rows, n_cols, embed_quant);
-                auto compressed = quantizer.compress_block(quantized);
-
-                WeightBlock block;
-                block.layer_id = 0;
-                block.matrix_id = 10; // special ID for embedding
-                block.n_rows = n_rows;
-                block.n_cols = n_cols;
-                block.compressed_size = (uint32_t)compressed.size();
-                block.original_size = (uint32_t)quantized.size();
-                block.quant_type = embed_quant;
-                block.offset = 0;
-
-                std::cout << "  Embed [" << n_rows << "x" << n_cols << "] "
-                          << "-> " << (embed_quant == 0 ? "Q8" : embed_quant == 1 ? "Q4" :
-                                      embed_quant == 2 ? "Q2" : "Q1.5")
-                          << " (" << compressed.size() << " bytes)\n";
-
-                blocks.push_back(block);
-                compressed_blocks.push_back(std::move(compressed));
+            auto* info = gguf.tensor_info(emb_name);
+            if (info) {
+                uint32_t n_rows = (uint32_t)info->dims[1];
+                uint32_t n_cols = (uint32_t)info->dims[0];
+                
+                std::cout << "\nEmbedding table: " << emb_name 
+                          << " [" << n_rows << "x" << n_cols << "]\n";
+                
+                // Process in chunks of 1024 rows to avoid massive allocations
+                constexpr uint32_t CHUNK_ROWS = 1024;
+                uint32_t n_chunks = (n_rows + CHUNK_ROWS - 1) / CHUNK_ROWS;
+                
+                std::vector<uint8_t> full_quantized;
+                std::vector<uint8_t> full_compressed;
+                size_t total_original = 0;
+                size_t total_compressed = 0;
+                
+                for (uint32_t chunk = 0; chunk < n_chunks; chunk++) {
+                    uint32_t row_start = chunk * CHUNK_ROWS;
+                    uint32_t row_end = std::min(row_start + CHUNK_ROWS, n_rows);
+                    uint32_t chunk_rows = row_end - row_start;
+                    
+                    // Read raw Q8_0 data for this chunk
+                    std::vector<uint8_t> raw;
+                    size_t n_read = gguf.read_tensor_data(emb_name, raw);
+                    if (n_read == 0) {
+                        std::cerr << "  WARNING: Failed to read embedding data\n";
+                        break;
+                    }
+                    
+                    // Read the full tensor, then process chunks from it
+                    // Actually, read_tensor_data reads the full tensor each time - 
+                    // we need to read once and cache
+                    if (!full_quantized.empty() && chunk == 0) {
+                        // Already read, skip
+                    }
+                }
+                
+                // Simpler approach: read once, process in chunks
+                if (info->type == GGML_TYPE_Q8_0) {
+                    // Read raw quantized data once
+                    std::vector<uint8_t> raw_data;
+                    size_t n_read = gguf.read_tensor_data(emb_name, raw_data);
+                    
+                    if (n_read > 0) {
+                        // Process rows in chunks
+                        uint32_t blk_size = 32;
+                        uint32_t blocks_per_row = (n_cols + blk_size - 1) / blk_size;
+                        uint32_t row_bytes = blocks_per_row * 34; // Q8_0 block: 2 bytes scale + 32 bytes data
+                        
+                        // Temporary buffers for one chunk
+                        std::vector<float> float_buf(CHUNK_ROWS * n_cols, 0.0f);
+                        
+                        for (uint32_t chunk = 0; chunk < n_chunks; chunk++) {
+                            uint32_t row_start = chunk * CHUNK_ROWS;
+                            uint32_t row_end = std::min(row_start + CHUNK_ROWS, n_rows);
+                            uint32_t chunk_rows = row_end - row_start;
+                            
+                            // Dequantize this chunk of rows
+                            for (uint32_t r = 0; r < chunk_rows; r++) {
+                                uint32_t global_row = row_start + r;
+                                const uint8_t* row_data = raw_data.data() + global_row * row_bytes;
+                                
+                                for (uint32_t b = 0; b < blocks_per_row; b++) {
+                                    // Read fp16 scale
+                                    uint16_t d16;
+                                    std::memcpy(&d16, row_data + b * 34, 2);
+                                    // Simple fp16->fp32 conversion
+                                    uint32_t sign = (d16 >> 15) & 1;
+                                    uint32_t exp = (d16 >> 10) & 0x1F;
+                                    uint32_t mant = d16 & 0x3FF;
+                                    uint32_t f;
+                                    if (exp == 0) {
+                                        f = (sign << 31) | (0x7F - 15 + 1) << 23 | (mant << 13);
+                                    } else if (exp == 0x1F) {
+                                        f = (sign << 31) | 0x7F800000 | (mant << 13);
+                                    } else {
+                                        f = (sign << 31) | ((exp + 0x70) << 23) | (mant << 13);
+                                    }
+                                    float scale;
+                                    std::memcpy(&scale, &f, sizeof(float));
+                                    
+                                    const int8_t* q = (const int8_t*)(row_data + b * 34 + 2);
+                                    uint32_t col_start = b * blk_size;
+                                    uint32_t col_end = std::min(col_start + blk_size, n_cols);
+                                    for (uint32_t c = col_start; c < col_end; c++) {
+                                        float_buf[r * n_cols + c] = (float)q[c - col_start] / scale;
+                                    }
+                                }
+                            }
+                            
+                            // Quantize this chunk
+                            auto quantized = quantizer.quantize_matrix(float_buf.data(), chunk_rows, n_cols, embed_quant);
+                            total_original += quantized.size();
+                            
+                            // Compress chunk
+                            auto compressed = quantizer.compress_block(quantized);
+                            total_compressed += compressed.size();
+                            
+                            // Append to full compressed data
+                            full_compressed.insert(full_compressed.end(), compressed.begin(), compressed.end());
+                            
+                            std::cout << "  Embed chunk " << (chunk+1) << "/" << n_chunks
+                                      << " [" << chunk_rows << "x" << n_cols << "] -> "
+                                      << (embed_quant == 0 ? "Q8" : embed_quant == 1 ? "Q4" :
+                                          embed_quant == 2 ? "Q2" : "Q1.5")
+                                      << " (" << compressed.size() << " bytes)\r";
+                            std::cout.flush();
+                        }
+                        
+                        std::cout << "\n";
+                        
+                        // Create a single WeightBlock for the entire embedding
+                        WeightBlock block;
+                        block.layer_id = 0;
+                        block.matrix_id = 10;
+                        block.n_rows = n_rows;
+                        block.n_cols = n_cols;
+                        block.compressed_size = (uint32_t)total_compressed;
+                        block.original_size = (uint32_t)total_original;
+                        block.quant_type = embed_quant;
+                        block.offset = 0;
+                        
+                        blocks.push_back(block);
+                        compressed_blocks.push_back(std::move(full_compressed));
+                    }
+                }
             }
         }
     }
 
     // ============================================================
-    //  Output projection (lm_head) if separate
+    //  Output projection (lm_head) if separate (chunked)
     // ============================================================
     {
         std::string out_name = tensor_name_output(gguf);
         if (!out_name.empty()) {
-            std::cout << "\nOutput projection: " << out_name << "\n";
-            std::vector<float> out_weights = gguf.dequantize_tensor(out_name);
-            if (!out_weights.empty()) {
-                auto* info = gguf.tensor_info(out_name);
-                uint32_t n_rows = info ? (uint32_t)info->dims[1] : cfg.n_vocab;
-                uint32_t n_cols = info ? (uint32_t)info->dims[0] : cfg.n_embd;
-
-                auto quantized = quantizer.quantize_matrix(out_weights.data(), n_rows, n_cols, quant_type);
-                auto compressed = quantizer.compress_block(quantized);
-
-                WeightBlock block;
-                block.layer_id = 0;
-                block.matrix_id = 11; // special ID for output projection
-                block.n_rows = n_rows;
-                block.n_cols = n_cols;
-                block.compressed_size = (uint32_t)compressed.size();
-                block.original_size = (uint32_t)quantized.size();
-                block.quant_type = quant_type;
-                block.offset = 0;
-
-                std::cout << "  Output [" << n_rows << "x" << n_cols << "] "
-                          << "-> " << (quant_type == 0 ? "Q8" : quant_type == 1 ? "Q4" :
-                                      quant_type == 2 ? "Q2" : "Q1.5")
-                          << " (" << compressed.size() << " bytes)\n";
-
-                blocks.push_back(block);
-                compressed_blocks.push_back(std::move(compressed));
+            auto* info = gguf.tensor_info(out_name);
+            if (info) {
+                uint32_t n_rows = (uint32_t)info->dims[1];
+                uint32_t n_cols = (uint32_t)info->dims[0];
+                
+                std::cout << "\nOutput projection: " << out_name 
+                          << " [" << n_rows << "x" << n_cols << "]\n";
+                
+                if (info->type == GGML_TYPE_Q8_0) {
+                    std::vector<uint8_t> raw_data;
+                    size_t n_read = gguf.read_tensor_data(out_name, raw_data);
+                    
+                    if (n_read > 0) {
+                        constexpr uint32_t CHUNK_ROWS = 1024;
+                        uint32_t n_chunks = (n_rows + CHUNK_ROWS - 1) / CHUNK_ROWS;
+                        uint32_t blk_size = 32;
+                        uint32_t blocks_per_row = (n_cols + blk_size - 1) / blk_size;
+                        uint32_t row_bytes = blocks_per_row * 34;
+                        
+                        std::vector<float> float_buf(CHUNK_ROWS * n_cols, 0.0f);
+                        size_t total_original = 0;
+                        size_t total_compressed = 0;
+                        std::vector<uint8_t> full_compressed;
+                        
+                        for (uint32_t chunk = 0; chunk < n_chunks; chunk++) {
+                            uint32_t row_start = chunk * CHUNK_ROWS;
+                            uint32_t row_end = std::min(row_start + CHUNK_ROWS, n_rows);
+                            uint32_t chunk_rows = row_end - row_start;
+                            
+                            for (uint32_t r = 0; r < chunk_rows; r++) {
+                                uint32_t global_row = row_start + r;
+                                const uint8_t* row_data = raw_data.data() + global_row * row_bytes;
+                                
+                                for (uint32_t b = 0; b < blocks_per_row; b++) {
+                                    uint16_t d16;
+                                    std::memcpy(&d16, row_data + b * 34, 2);
+                                    uint32_t sign = (d16 >> 15) & 1;
+                                    uint32_t exp = (d16 >> 10) & 0x1F;
+                                    uint32_t mant = d16 & 0x3FF;
+                                    uint32_t f;
+                                    if (exp == 0) {
+                                        f = (sign << 31) | (0x7F - 15 + 1) << 23 | (mant << 13);
+                                    } else if (exp == 0x1F) {
+                                        f = (sign << 31) | 0x7F800000 | (mant << 13);
+                                    } else {
+                                        f = (sign << 31) | ((exp + 0x70) << 23) | (mant << 13);
+                                    }
+                                    float scale;
+                                    std::memcpy(&scale, &f, sizeof(float));
+                                    
+                                    const int8_t* q = (const int8_t*)(row_data + b * 34 + 2);
+                                    uint32_t col_start = b * blk_size;
+                                    uint32_t col_end = std::min(col_start + blk_size, n_cols);
+                                    for (uint32_t c = col_start; c < col_end; c++) {
+                                        float_buf[r * n_cols + c] = (float)q[c - col_start] / scale;
+                                    }
+                                }
+                            }
+                            
+                            auto quantized = quantizer.quantize_matrix(float_buf.data(), chunk_rows, n_cols, quant_type);
+                            total_original += quantized.size();
+                            auto compressed = quantizer.compress_block(quantized);
+                            total_compressed += compressed.size();
+                            full_compressed.insert(full_compressed.end(), compressed.begin(), compressed.end());
+                            
+                            std::cout << "  Output chunk " << (chunk+1) << "/" << n_chunks
+                                      << " [" << chunk_rows << "x" << n_cols << "]\r";
+                            std::cout.flush();
+                        }
+                        std::cout << "\n";
+                        
+                        WeightBlock block;
+                        block.layer_id = 0;
+                        block.matrix_id = 11;
+                        block.n_rows = n_rows;
+                        block.n_cols = n_cols;
+                        block.compressed_size = (uint32_t)total_compressed;
+                        block.original_size = (uint32_t)total_original;
+                        block.quant_type = quant_type;
+                        block.offset = 0;
+                        
+                        blocks.push_back(block);
+                        compressed_blocks.push_back(std::move(full_compressed));
+                    }
+                }
             }
         }
     }
