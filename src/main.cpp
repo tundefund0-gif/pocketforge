@@ -126,7 +126,10 @@ int main(int argc, char** argv) {
         // Note: char(1) is used as bos_token placeholder (actual token ID 0)
         // This gets re-tokenized by BPE into the correct bos token
     } else {
-        formatted_prompt = system_prompt + "\n\n" + prompt;
+        // Use the model's native ChatML format for instruction-tuned output
+        formatted_prompt = "<|im_start|>system\n" + system_prompt + "<|im_end|>\n"
+                          "<|im_start|>user\n" + prompt + "<|im_end|>\n"
+                          "<|im_start|>assistant\n";
     }
 
     // Tokenize prompt using BPE tokenizer
