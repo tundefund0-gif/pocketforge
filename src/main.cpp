@@ -44,6 +44,7 @@ int main(int argc, char** argv) {
     uint32_t context_size = 4096;
     forge::SamplingConfig sampling;
     sampling.greedy = true;       // Default to greedy for clean output
+    sampling.temperature = 0.0f;
     sampling.temperature = 0.0f;  // Greedy
     sampling.top_k = 40;
     sampling.top_p = 0.9f;
@@ -116,15 +117,16 @@ int main(int argc, char** argv) {
         std::cout << "Tokenizer: not loaded (use --gguf <file.gguf>)\n";
     }
 
-    // Build MiniCPM5 chat-formatted prompt
+    // Build prompt with bos token for proper model conditioning
     std::string formatted_prompt;
     if (tokenizer.is_loaded()) {
-        // Use the MiniCPM5 chat format with system prompt
-        formatted_prompt = "<system>" + system_prompt + "</system>\n"
-                          "<user>" + prompt + "</user>\n"
-                          "<assistant>";
+        // Use bos_token + instruction format for clean English output
+        // The model uses <s> as bos_token (token 0)
+        formatted_prompt = std::string(1, (char)1) + system_prompt + "\n\n" + prompt;
+        // Note: char(1) is used as bos_token placeholder (actual token ID 0)
+        // This gets re-tokenized by BPE into the correct bos token
     } else {
-        formatted_prompt = prompt;
+        formatted_prompt = system_prompt + "\n\n" + prompt;
     }
 
     // Tokenize prompt using BPE tokenizer
