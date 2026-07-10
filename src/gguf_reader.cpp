@@ -521,11 +521,13 @@ ModelConfig GGUFFile::read_config() const {
                      metadata_int("minicpm.context_length",
                      metadata_int("general.context_length", 131072)));
 
-    // head_dim
-    int64_t hd = metadata_int("llama.attention.head_count",
-                 metadata_int("minicpm.attention.head_count", 0));
-    if (hd > 0 && cfg.n_heads > 0) {
-        // Some models specify head_dim explicitly
+    // head_dim - check rope.dimension_count as authoritative source
+    int64_t hd_rope = metadata_int("llama.rope.dimension_count",
+                      metadata_int("minicpm.rope.dimension_count", 0));
+    if (hd_rope > 0) {
+        cfg.head_dim_ = (uint32_t)hd_rope;
+    } else {
+        // Fallback: check explicit head_dim metadata
         int64_t hd_explicit = metadata_int("llama.attention.head_dim",
                              metadata_int("minicpm.attention.head_dim", 0));
         if (hd_explicit > 0) {

@@ -541,7 +541,7 @@ void Engine::compute_attention(uint32_t layer_id, const float* input,
 
         // Q = input @ Wq (input is 1xK, Wq is NxK, output is 1xN)
         matmul_quantized(input, wq.data.data(), q_buf_.data(),
-                         1, n_embd, n_embd,
+                         1, config_.n_heads * head_dim, config_.n_embd,
                          wq.row_scales.data(), nullptr);
 
         // K = input @ Wk (GQA: Wk is [n_kv_heads*head_dim x n_embd])
@@ -606,7 +606,7 @@ void Engine::compute_attention(uint32_t layer_id, const float* input,
         const auto& wo = weight_cache_[base + 3];
         // O = attn_out @ Wo^T
         matmul_quantized(attn_out_.data(), wo.data.data(), output,
-                         1, n_embd, n_embd,
+                         1, config_.n_embd, config_.n_heads * head_dim,
                          wo.row_scales.data(), nullptr);
         std::memcpy(attn_out_.data(), output, n_embd * sizeof(float));
     }
