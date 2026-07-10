@@ -59,6 +59,8 @@ endif()
 # Core library
 file(GLOB FORGE_SRC src/*.cpp)
 list(REMOVE_ITEM FORGE_SRC "${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp")
+list(REMOVE_ITEM FORGE_SRC "${CMAKE_CURRENT_SOURCE_DIR}/src/forge_server.cpp")
+list(REMOVE_ITEM FORGE_SRC "${CMAKE_CURRENT_SOURCE_DIR}/src/http_server.cpp")
 list(REMOVE_ITEM FORGE_SRC "${CMAKE_CURRENT_SOURCE_DIR}/src/quant_tool.cpp")
 
 add_library(pocketforge STATIC ${FORGE_SRC})
