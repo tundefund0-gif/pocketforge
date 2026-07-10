@@ -119,7 +119,7 @@ private:
     std::vector<float> attn_norm_weights_;
     std::vector<float> ffn_norm_weights_;
     std::vector<float> final_norm_weights_;
-    bool norm_weights_loaded_ = false;
+    // bool norm_weights_loaded_ = false;
     bool real_weights_avail_ = false;
 
     void compute_attention(uint32_t layer_id, const float* input, float* output,

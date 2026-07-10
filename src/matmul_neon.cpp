@@ -190,7 +190,13 @@ float dot_product(const float* a, const float* b, uint32_t n) {
     for (; i + 4 <= n; i += 4) {
         acc = vmlaq_f32(acc, vld1q_f32(a + i), vld1q_f32(b + i));
     }
+#ifdef __aarch64__
     float sum = vaddvq_f32(acc);
+#else
+    // ARM32: pairwise add
+    float32x2_t r = vadd_f32(vget_low_f32(acc), vget_high_f32(acc));
+    float sum = vget_lane_f32(r, 0) + vget_lane_f32(r, 1);
+#endif
     for (; i < n; i++) sum += a[i] * b[i];
     return sum;
 #else

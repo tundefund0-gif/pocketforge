@@ -208,7 +208,7 @@ bool GGUFFile::open(const std::string& path) {
     offset = (offset + 31) & ~31;
 
     // Read tensor info
-    uint64_t tensor_data_offset = offset + n_tensors_ * 48; // approximate, will be refined
+    // uint64_t tensor_data_offset = offset + n_tensors_ * 48;
     for (uint64_t i = 0; i < n_tensors_; i++) {
         GGUFTensorInfo info;
         info.name = read_string(offset);
@@ -344,7 +344,7 @@ static void dequantize_q8_0_row(const uint8_t* src, float* dst, uint64_t n) {
     for (uint64_t b = 0; b < n_blocks; b++) {
         uint16_t d16;
         std::memcpy(&d16, src + b * 34, sizeof(uint16_t));
-        float d = (float)(int16_t)d16 / (float)(1 << 8); // fp16 to fp32
+        // float d = (float)(int16_t)d16 / (float)(1 << 8); // fp16 to fp32
         // Actually GGUF Q8_0 stores float16 scale, let's handle properly
         // For now: read scale as half precision
         float scale;

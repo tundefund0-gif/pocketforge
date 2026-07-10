@@ -28,12 +28,12 @@ void MTPHeads::init_weights() {
         head.down_scale.resize(ff, 1.0f);
 
         // Generate random float weights, then quantize to Q4
-        auto init_q4 = [d, ff, init_scale](
+        auto init_q4 = [init_scale](
             std::vector<uint8_t>& q, std::vector<float>& scales,
             uint32_t rows, uint32_t cols) {
             std::vector<float> tmp(rows * cols);
             for (auto& v : tmp) {
-                v = ((float)rand() / RAND_MAX * 2.0f - 1.0f) * init_scale;
+                v = ((float)rand() / (float)RAND_MAX * 2.0f - 1.0f) * init_scale;
             }
             MTPHeads::quantize_q4(tmp.data(), q.data(), scales, rows, cols);
         };
