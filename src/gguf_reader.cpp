@@ -243,10 +243,31 @@ std::string GGUFFile::read_string(size_t& offset) const {
 }
 
 bool GGUFFile::skip_value(size_t& offset, GGUFValueType type) const {
-    uint64_t sz = type_size(type);
-    if (sz == 0) return false;
-    offset += sz;
-    return true;
+    switch (type) {
+        case GGUF_TYPE_STRING: {
+            // Read string length and skip the data
+            uint64_t len = read_at<uint64_t>(offset);
+            offset += sizeof(uint64_t) + len;
+            return true;
+        }
+        case GGUF_TYPE_ARRAY: {
+            // Skip array header then recursively skip elements
+            GGUFValueType arr_type = static_cast<GGUFValueType>(read_at<uint32_t>(offset));
+            offset += sizeof(uint32_t);
+            uint64_t arr_len = read_at<uint64_t>(offset);
+            offset += sizeof(uint64_t);
+            for (uint64_t j = 0; j < arr_len; j++) {
+                skip_value(offset, arr_type);
+            }
+            return true;
+        }
+        default: {
+            uint64_t sz = type_size(type);
+            if (sz == 0) return false;
+            offset += sz;
+            return true;
+        }
+    }
 }
 
 uint64_t GGUFFile::type_size(GGUFValueType type) const {
