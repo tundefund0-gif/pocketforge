@@ -345,6 +345,85 @@ std::vector<int8_t> WeightLoader::load_block(uint32_t layer_id, uint32_t matrix_
     return {}; // not found
 }
 
+WeightLoader::LoadResult WeightLoader::load_block_with_scales(
+    uint32_t layer_id, uint32_t matrix_id)
+{
+    LoadResult result;
+    for (const auto& blk : index_) {
+        if (blk.layer_id == layer_id && blk.matrix_id == matrix_id) {
+            const uint8_t* compressed = (const uint8_t*)mmap_addr_ + blk.offset;
+            size_t compressed_size = blk.compressed_size;
+            size_t dst_size = blk.original_size;
+            std::vector<uint8_t> decompressed(dst_size);
+            size_t dec_result = ZSTD_decompress(
+                decompressed.data(), dst_size,
+                compressed, compressed_size);
+            if (ZSTD_isError(dec_result)) return result;
+
+            result.data.resize(blk.n_rows * blk.n_cols);
+            result.global_scale = 1.0f;
+
+            uint32_t n = blk.n_rows * blk.n_cols;
+
+            switch (blk.quant_type) {
+            case 0: { // Q8
+                uint32_t n_blocks = (n + 31) / 32;
+                uint32_t cols = blk.n_cols;
+                uint32_t rows = blk.n_rows;
+                uint32_t blocks_per_row = (cols + 31) / 32;
+                result.row_scales.resize(rows, 0.0f);
+
+                const uint8_t* ptr = decompressed.data();
+                for (uint32_t b = 0; b < n_blocks; b++) {
+                    float blk_scale;
+                    std::memcpy(&blk_scale, ptr, sizeof(float)); ptr += sizeof(float);
+                    uint32_t row = b / blocks_per_row;
+                    result.row_scales[row] += blk_scale;
+                    uint32_t start = b * 32;
+                    uint32_t end = std::min(start + 32, n);
+                    for (uint32_t i = start; i < end; i++) {
+                        result.data[i] = (int8_t)(*ptr++);
+                    }
+                    // Skip padding
+                    for (uint32_t i = end; i < start + 32; i++) ptr++;
+                }
+                // Average row scales
+                float total_scale = 0.0f;
+                for (uint32_t r = 0; r < rows; r++) {
+                    result.row_scales[r] /= (float)blocks_per_row;
+                    total_scale += result.row_scales[r];
+                }
+                result.global_scale = total_scale / (float)rows;
+                break;
+            }
+            case 1: { // Q4
+                dequant_q4_to_int8(decompressed.data(), result.data.data(), 1.0f, n);
+                uint32_t rows = blk.n_rows;
+                result.row_scales.assign(rows, 1.0f);
+                result.global_scale = 1.0f;
+                break;
+            }
+            case 2: { // Q2
+                dequant_q2_to_int8(decompressed.data(), result.data.data(), 1.0f, n);
+                uint32_t rows = blk.n_rows;
+                result.row_scales.assign(rows, 1.0f);
+                result.global_scale = 1.0f;
+                break;
+            }
+            case 3: { // Q1.5
+                dequant_ternary_to_int8(decompressed.data(), result.data.data(), n);
+                uint32_t rows = blk.n_rows;
+                result.row_scales.assign(rows, 1.0f);
+                result.global_scale = 1.0f;
+                break;
+            }
+            }
+            return result;
+        }
+    }
+    return result;
+}
+
 bool WeightLoader::prefetch_layer(uint32_t layer_id) {
     // In a more advanced implementation, we'd madvise the pages
     // For now, we just return true (the prefetch pipeline handles async loading)

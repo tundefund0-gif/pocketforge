@@ -123,6 +123,31 @@ bool Engine::load_model(const std::string& squeezef_path) {
     }
 
     prefetcher_->start();
+
+    // Try loading embedding table from .squeeze (matrix_id=10)
+    {
+        auto emb_block = loader_->load_block_with_scales(0, 10);
+        if (!emb_block.data.empty()) {
+            uint32_t emb_vocab = config_.n_vocab;
+            uint32_t emb_dim = config_.n_embd;
+            // Dequantize to float for now (can optimize later)
+            embedding_table_.resize((size_t)emb_vocab * emb_dim);
+            for (uint32_t v = 0; v < emb_vocab && v < 256; v++) {  // limit for memory
+                for (uint32_t d = 0; d < emb_dim; d++) {
+                    size_t idx = (size_t)v * emb_dim + d;
+                    if (idx < emb_block.data.size()) {
+                        embedding_table_[idx] = (float)emb_block.data[idx] * emb_block.global_scale;
+                    }
+                }
+            }
+            embeddings_loaded_ = true;
+            std::cout << "Loaded embedding table (" << emb_block.data.size() << " bytes)\n";
+        }
+    }
+
+    // Pre-allocate weight cache (7 matrices per layer, initially empty)
+    weight_cache_.resize(config_.n_layers * 7);
+
     return true;
 }
 
@@ -442,7 +467,32 @@ void Engine::generate_placeholder_logits(int32_t token, float* logits, uint32_t 
 }
 
 // ============================================================
-//  Attention
+//  Layer weight loading
+// ============================================================
+
+void Engine::load_layer_weights(uint32_t layer_id) {
+    if (!loader_ || loader_->num_blocks() == 0) return;
+    uint32_t base = layer_id * 7;
+    if (base + 7 > weight_cache_.size()) return;
+    bool all_loaded = true;
+    for (uint32_t m = 0; m < 7; m++) {
+        if (!weight_cache_[base + m].loaded) {
+            auto result = loader_->load_block_with_scales(layer_id, m);
+            if (!result.data.empty()) {
+                weight_cache_[base + m].data = std::move(result.data);
+                weight_cache_[base + m].row_scales = std::move(result.row_scales);
+                weight_cache_[base + m].global_scale = result.global_scale;
+                weight_cache_[base + m].loaded = true;
+            } else {
+                all_loaded = false;
+            }
+        }
+    }
+    if (all_loaded) real_weights_avail_ = true;
+}
+
+// ============================================================
+//  Attention (with real weight support)
 // ============================================================
 
 void Engine::compute_attention(uint32_t layer_id, const float* input,
@@ -454,23 +504,55 @@ void Engine::compute_attention(uint32_t layer_id, const float* input,
 
     std::fill(attn_out_.begin(), attn_out_.end(), 0.0f);
 
-    // Placeholder QKV projection
-    for (uint32_t i = 0; i < n_embd; i++) {
-        q_buf_[i] = input[i] * 0.1f;
-        k_buf_[i] = input[i] * 0.1f;
-        v_buf_[i] = input[i] * 0.1f;
+    // Try to load real weights
+    uint32_t base = layer_id * 7;
+    bool have_weights = (base + 7 <= weight_cache_.size() &&
+                         weight_cache_[base + 0].loaded &&  // Q
+                         weight_cache_[base + 1].loaded &&  // K
+                         weight_cache_[base + 2].loaded);   // V
+
+    if (have_weights) {
+        // Real QKV projection using matmul_quantized
+        // Q projection: q = input @ Wq^T  (input [1 x n_embd], Wq [n_embd x n_embd])
+        const auto& wq = weight_cache_[base + 0];
+        const auto& wk = weight_cache_[base + 1];
+        const auto& wv = weight_cache_[base + 2];
+        const auto& wo = weight_cache_[base + 3];
+
+        // Q = input @ Wq (input is 1xK, Wq is NxK, output is 1xN)
+        matmul_quantized(input, wq.data.data(), q_buf_.data(),
+                         1, n_embd, n_embd,
+                         wq.row_scales.data(), nullptr);
+
+        // K = input @ Wk (GQA: Wk is [n_kv_heads*head_dim x n_embd])
+        matmul_quantized(input, wk.data.data(), k_buf_.data(),
+                         1, n_kv_heads * head_dim, n_embd,
+                         wk.row_scales.data(), nullptr);
+
+        // V = input @ Wv
+        matmul_quantized(input, wv.data.data(), v_buf_.data(),
+                         1, n_kv_heads * head_dim, n_embd,
+                         wv.row_scales.data(), nullptr);
+
+        // Prefetch output weights for attention output projection
+        (void)wo; // used later after attention computes
+    } else {
+        // Placeholder QKV projection (for testing)
+        for (uint32_t i = 0; i < n_embd; i++) {
+            q_buf_[i] = input[i] * 0.1f;
+            k_buf_[i] = input[i] * 0.1f;
+            v_buf_[i] = input[i] * 0.1f;
+        }
     }
 
-    // Streaming attention per head (no full attention matrix)
+    // Streaming attention per head
     for (uint32_t h = 0; h < n_heads; h++) {
         uint32_t kv_head = h % n_kv_heads;
         float* q_head = q_buf_.data() + h * head_dim;
 
-        // Get cached KV scores (streaming int8 dot products)
         uint32_t kv_count = kv_cache_->attention_scores(
             layer_id, kv_head, q_head, scores_.data());
 
-        // Score for current token
         float self_score = 0.0f;
         const float* k_head = k_buf_.data() + kv_head * head_dim;
         for (uint32_t i = 0; i < head_dim; i++) {
@@ -478,16 +560,13 @@ void Engine::compute_attention(uint32_t layer_id, const float* input,
         }
         scores_[kv_count] = self_score;
 
-        // Scale and softmax
         float scale = 1.0f / std::sqrt((float)head_dim);
         for (uint32_t i = 0; i <= kv_count; i++) scores_[i] *= scale;
         softmax(scores_.data(), kv_count + 1);
 
-        // Weighted sum from cache (streaming int8)
         kv_cache_->attention_weighted_sum(
             layer_id, kv_head, scores_.data(), output, kv_count);
 
-        // Add current token's contribution
         float self_prob = scores_[kv_count];
         const float* v_head = v_buf_.data() + kv_head * head_dim;
         for (uint32_t i = 0; i < head_dim; i++) {
@@ -502,23 +581,71 @@ void Engine::compute_attention(uint32_t layer_id, const float* input,
                          v_buf_.data() + h * head_dim);
     }
 
+    // Apply output projection if weights available
+    if (have_weights) {
+        const auto& wo = weight_cache_[base + 3];
+        // O = attn_out @ Wo^T
+        matmul_quantized(attn_out_.data(), wo.data.data(), output,
+                         1, n_embd, n_embd,
+                         wo.row_scales.data(), nullptr);
+        std::memcpy(attn_out_.data(), output, n_embd * sizeof(float));
+    }
+
     std::memcpy(output, attn_out_.data(), n_embd * sizeof(float));
 }
 
 // ============================================================
-//  FFN
+//  FFN (with real weight + SiLU support)
 // ============================================================
 
 void Engine::compute_ffn(uint32_t layer_id, const float* input, float* output) {
     uint32_t n_embd = config_.n_embd;
-    (void)layer_id;
+    uint32_t n_ff = config_.n_ff;
 
-    for (uint32_t i = 0; i < n_embd; i++) {
-        float val = 0.0f;
-        for (uint32_t j = 0; j < n_embd; j++) {
-            val += input[j] * 0.01f;
+    uint32_t base = layer_id * 7;
+    bool have_weights = (base + 7 <= weight_cache_.size() &&
+                         weight_cache_[base + 4].loaded &&  // gate
+                         weight_cache_[base + 5].loaded &&  // up
+                         weight_cache_[base + 6].loaded);   // down
+
+    if (have_weights) {
+        const auto& w_gate = weight_cache_[base + 4];
+        const auto& w_up   = weight_cache_[base + 5];
+        const auto& w_down = weight_cache_[base + 6];
+
+        // gate = input @ Wgate (n_ff x n_embd)
+        std::vector<float> gate_buf(n_ff, 0.0f);
+        matmul_quantized(input, w_gate.data.data(), gate_buf.data(),
+                         1, n_ff, n_embd,
+                         w_gate.row_scales.data(), nullptr);
+
+        // up = input @ Wup (n_ff x n_embd)
+        std::vector<float> up_buf(n_ff, 0.0f);
+        matmul_quantized(input, w_up.data.data(), up_buf.data(),
+                         1, n_ff, n_embd,
+                         w_up.row_scales.data(), nullptr);
+
+        // SiLU activation on gate: silu(x) = x * sigmoid(x)
+        std::vector<float> ffn_hidden(n_ff, 0.0f);
+        for (uint32_t i = 0; i < n_ff; i++) {
+            float g = gate_buf[i];
+            float sig = 1.0f / (1.0f + std::exp(-g));
+            ffn_hidden[i] = g * sig * up_buf[i];
         }
-        output[i] = std::max(0.0f, val);
+
+        // down = ffn_hidden @ Wdown (n_embd x n_ff)
+        matmul_quantized(ffn_hidden.data(), w_down.data.data(), output,
+                         1, n_embd, n_ff,
+                         w_down.row_scales.data(), nullptr);
+    } else {
+        // Placeholder FFN (for testing)
+        for (uint32_t i = 0; i < n_embd; i++) {
+            float val = 0.0f;
+            for (uint32_t j = 0; j < n_embd; j++) {
+                val += input[j] * 0.01f;
+            }
+            output[i] = std::max(0.0f, val);
+        }
     }
 }
 

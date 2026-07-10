@@ -105,6 +105,23 @@ private:
     std::vector<float> verify_hidden_;
     std::vector<float> verify_logits_;
 
+    // Real weight loading
+    struct CachedWeight {
+        std::vector<int8_t> data;
+        std::vector<float> row_scales;
+        float global_scale = 1.0f;
+        bool loaded = false;
+    };
+    std::vector<CachedWeight> weight_cache_;
+    void load_layer_weights(uint32_t layer_id);
+
+    // RMS norm weights (1D per layer)
+    std::vector<float> attn_norm_weights_;
+    std::vector<float> ffn_norm_weights_;
+    std::vector<float> final_norm_weights_;
+    bool norm_weights_loaded_ = false;
+    bool real_weights_avail_ = false;
+
     void compute_attention(uint32_t layer_id, const float* input, float* output,
                            uint32_t token_pos);
     void compute_ffn(uint32_t layer_id, const float* input, float* output);

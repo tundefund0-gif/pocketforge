@@ -26,3 +26,6 @@ add_forge_test(test_memory)
 add_forge_test(test_benchmark)
 add_forge_test(test_tool_calling)
 add_forge_test(test_tool_accuracy)
+
+# GGUF reader tests
+add_forge_test(test_gguf_reader)

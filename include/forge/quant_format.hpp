@@ -101,6 +101,17 @@ public:
     ModelConfig config() const;
 
     // Decompress a specific weight block
+    struct LoadResult {
+        std::vector<int8_t> data;
+        std::vector<float> row_scales;
+        float global_scale = 1.0f;
+    };
+
+    LoadResult load_block_with_scales(
+        uint32_t layer_id,
+        uint32_t matrix_id
+    );
+
     std::vector<int8_t> load_block(
         uint32_t layer_id,
         uint32_t matrix_id,
