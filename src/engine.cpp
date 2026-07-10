@@ -167,7 +167,91 @@ bool Engine::load_model(const std::string& squeezef_path) {
     // Pre-allocate weight cache (7 matrices per layer, initially empty)
     // Only cache 2 layers worth of weights to save RAM (sliding window eviction)
     weight_cache_.resize(std::max((uint32_t)2, config_.n_layers) * 7);
+    // Also pre-allocate norm weight arrays (loaded from .squeeze)
+    attn_norm_weights_.resize(config_.n_layers * config_.n_embd, 1.0f);
+    ffn_norm_weights_.resize(config_.n_layers * config_.n_embd, 1.0f);
+    final_norm_weights_.resize(config_.n_embd, 1.0f);
 
+    // Load norm weights from .squeeze (or skip if not stored)
+    if (loader_) {
+        // Output norm (layer 0, matrix_id=9)
+        {
+            auto block = loader_->load_block_with_scales(0, 9);
+            if (!block.data.empty()) {
+                uint32_t n = std::min((uint32_t)final_norm_weights_.size(), block.n_cols);
+                for (uint32_t i = 0; i < n; i++) {
+                    final_norm_weights_[i] = (float)block.data[i] * block.global_scale;
+                }
+                std::cout << "Loaded output norm (" << n << " weights)\n";
+            }
+        }
+        // Per-layer norm weights
+        for (uint32_t l = 0; l < config_.n_layers; l++) {
+            auto block_a = loader_->load_block_with_scales(l, 7);
+            if (!block_a.data.empty()) {
+                uint32_t n = std::min(config_.n_embd, block_a.n_cols);
+                for (uint32_t i = 0; i < n; i++)
+                    attn_norm_weights_[l * config_.n_embd + i] = (float)block_a.data[i] * block_a.global_scale;
+            }
+            auto block_f = loader_->load_block_with_scales(l, 8);
+            if (!block_f.data.empty()) {
+                uint32_t n = std::min(config_.n_embd, block_f.n_cols);
+                for (uint32_t i = 0; i < n; i++)
+                    ffn_norm_weights_[l * config_.n_embd + i] = (float)block_f.data[i] * block_f.global_scale;
+            }
+        }
+    }
+
+    return true;
+}
+
+bool Engine::load_norm_weights_from_gguf(const std::string& gguf_path) {
+    forge::GGUFFile gguf;
+    if (!gguf.open(gguf_path)) {
+        std::cerr << "Failed to open GGUF for norm weights: " << gguf_path << "\n";
+        return false;
+    }
+    
+    uint32_t n_embd = config_.n_embd;
+    uint32_t n_layers = config_.n_layers;
+    
+    // Resize norm arrays if needed
+    attn_norm_weights_.resize(n_layers * n_embd, 1.0f);
+    ffn_norm_weights_.resize(n_layers * n_embd, 1.0f);
+    final_norm_weights_.resize(n_embd, 1.0f);
+    
+    // Output norm
+    {
+        auto data = gguf.dequantize_tensor("output_norm.weight");
+        if (data.empty()) data = gguf.dequantize_tensor("model.norm.weight");
+        if (data.empty()) data = gguf.dequantize_tensor("gpt_neox.final_layer_norm.weight");
+        if (!data.empty()) {
+            uint32_t n = std::min(n_embd, (uint32_t)data.size());
+            std::memcpy(final_norm_weights_.data(), data.data(), n * sizeof(float));
+            std::cout << "Loaded output_norm from GGUF\n";
+        }
+    }
+    
+    // Per-layer norms
+    for (uint32_t l = 0; l < n_layers; l++) {
+        std::string attn_key = "blk." + std::to_string(l) + ".attn_norm.weight";
+        std::string ffn_key = "blk." + std::to_string(l) + ".ffn_norm.weight";
+        
+        auto attn_data = gguf.dequantize_tensor(attn_key);
+        if (!attn_data.empty()) {
+            uint32_t n = std::min(n_embd, (uint32_t)attn_data.size());
+            std::memcpy(attn_norm_weights_.data() + l * n_embd, attn_data.data(), n * sizeof(float));
+        }
+        
+        auto ffn_data = gguf.dequantize_tensor(ffn_key);
+        if (!ffn_data.empty()) {
+            uint32_t n = std::min(n_embd, (uint32_t)ffn_data.size());
+            std::memcpy(ffn_norm_weights_.data() + l * n_embd, ffn_data.data(), n * sizeof(float));
+        }
+    }
+    
+    std::cout << "Loaded norm weights from GGUF: " << gguf_path << "\n";
+    gguf.close();
     return true;
 }
 
@@ -406,15 +490,29 @@ std::vector<float> Engine::forward_with_hidden(
         }
     }
 
-    // Pre-allocate norm weights vector (avoids UB with single-float pointer)
-    std::vector<float> norm_weights(n_embd, 1.0f);
-
     // ============================================================
     //  Transformer layers
     // ============================================================
     for (uint32_t l = 0; l < config_.n_layers; l++) {
-        // RMSNorm
-        rmsnorm(normed_.data(), hidden_state_.data(), norm_weights.data(), n_embd);
+        // Use learned norm weights (or fallback to 1.0 if not loaded)
+        const float* attn_norm_w = (l * config_.n_embd < attn_norm_weights_.size()) 
+            ? attn_norm_weights_.data() + l * config_.n_embd : nullptr;
+        const float* ffn_norm_w = (l * config_.n_embd < ffn_norm_weights_.size()) 
+            ? ffn_norm_weights_.data() + l * config_.n_embd : nullptr;
+        
+        // Dummy fallback if norm weights not loaded
+        std::vector<float> fallback_norm;
+        if (!attn_norm_w) {
+            fallback_norm.assign(n_embd, 1.0f);
+            attn_norm_w = fallback_norm.data();
+        }
+        if (!ffn_norm_w) {
+            if (fallback_norm.empty()) fallback_norm.assign(n_embd, 1.0f);
+            ffn_norm_w = fallback_norm.data();
+        }
+        
+        // RMSNorm before attention (use learned attn_norm weights)
+        rmsnorm(normed_.data(), hidden_state_.data(), attn_norm_w, n_embd);
 
         // Attention
         compute_attention(l, normed_.data(), attn_out_.data(), l);
@@ -424,8 +522,8 @@ std::vector<float> Engine::forward_with_hidden(
             hidden_state_[i] += attn_out_[i];
         }
 
-        // RMSNorm before FFN
-        rmsnorm(normed_.data(), hidden_state_.data(), norm_weights.data(), n_embd);
+        // RMSNorm before FFN (use learned ffn_norm weights)
+        rmsnorm(normed_.data(), hidden_state_.data(), ffn_norm_w, n_embd);
 
         // Layer skip
         bool skip_ffn = false;
@@ -455,8 +553,17 @@ std::vector<float> Engine::forward_with_hidden(
         std::memcpy(hidden_out.data(), hidden_state_.data(), n_embd * sizeof(float));
     }
 
-    // Final RMSNorm
-    rmsnorm(normed_.data(), hidden_state_.data(), norm_weights.data(), n_embd);
+    // Final RMSNorm (use learned output_norm weights)
+    {
+        const float* final_w = (final_norm_weights_.size() >= n_embd) 
+            ? final_norm_weights_.data() : nullptr;
+        std::vector<float> fallback;
+        if (!final_w) {
+            fallback.assign(n_embd, 1.0f);
+            final_w = fallback.data();
+        }
+        rmsnorm(normed_.data(), hidden_state_.data(), final_w, n_embd);
+    }
 
     // ============================================================
     //  Unembed (logits)

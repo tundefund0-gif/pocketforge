@@ -76,6 +76,20 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    // Load norm weights from GGUF if available
+    {
+        std::string gguf_path;
+        for (int i = 2; i < argc; i++) {
+            if (std::string(argv[i]) == "--gguf" && i + 1 < argc) gguf_path = argv[++i];
+        }
+        if (gguf_path.empty()) {
+            gguf_path = model_path;
+            if (gguf_path.size() > 8 && gguf_path.substr(gguf_path.size()-8) == ".squeeze")
+                gguf_path = gguf_path.substr(0, gguf_path.size()-8) + ".q8.gguf";
+        }
+        engine.load_norm_weights_from_gguf(gguf_path);
+    }
+
     auto cfg = engine.config();
     std::cout << "Model: " << cfg.n_layers << " layers, "
               << cfg.n_embd << " embd, " << cfg.n_heads << " heads\n";

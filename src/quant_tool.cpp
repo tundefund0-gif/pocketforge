@@ -573,6 +573,90 @@ int main(int argc, char** argv) {
     // ============================================================
     //  Write .squeeze file
     // ============================================================
+    // ============================================================
+    //  Norm weights (attn_norm, ffn_norm per layer, plus output_norm)
+    //  Stored as matrix_id 7 (attn_norm), 8 (ffn_norm), 9 (output_norm)
+    //  These are 1D F32 weight vectors for RMS norm (not quantized)
+    // ============================================================
+    {
+        // Output norm (final norm) - stored as layer=0, matrix_id=9
+        std::string final_norm_name = tensor_name_final_norm(gguf);
+        if (!final_norm_name.empty()) {
+            auto* info = gguf.tensor_info(final_norm_name);
+            if (info && info->n_dims == 1) {
+                std::vector<float> weights = gguf.dequantize_tensor(final_norm_name);
+                if (!weights.empty()) {
+                    // Store as Q8-quantized block for consistency
+                    auto quantized = quantizer.quantize_matrix(weights.data(), 1, (uint32_t)weights.size(), quant_type);
+                    auto compressed = quantizer.compress_block(quantized);
+                    WeightBlock block;
+                    block.layer_id = 0;
+                    block.matrix_id = 9;
+                    block.n_rows = 1;
+                    block.n_cols = (uint32_t)weights.size();
+                    block.compressed_size = (uint32_t)compressed.size();
+                    block.original_size = (uint32_t)quantized.size();
+                    block.quant_type = quant_type;
+                    block.offset = 0;
+                    blocks.push_back(block);
+                    compressed_blocks.push_back(std::move(compressed));
+                    std::cout << "Stored output_norm (" << weights.size() << " weights)\n";
+                }
+            }
+        }
+        
+        for (uint32_t l = 0; l < cfg.n_layers; l++) {
+            // Attn norm - matrix_id = 7
+            std::string attn_norm_name = tensor_name_attn_norm(gguf, l);
+            if (!attn_norm_name.empty()) {
+                auto* info = gguf.tensor_info(attn_norm_name);
+                if (info && info->n_dims == 1) {
+                    std::vector<float> weights = gguf.dequantize_tensor(attn_norm_name);
+                    if (!weights.empty()) {
+                        auto quantized = quantizer.quantize_matrix(weights.data(), 1, (uint32_t)weights.size(), quant_type);
+                        auto compressed = quantizer.compress_block(quantized);
+                        WeightBlock block;
+                        block.layer_id = l;
+                        block.matrix_id = 7;
+                        block.n_rows = 1;
+                        block.n_cols = (uint32_t)weights.size();
+                        block.compressed_size = (uint32_t)compressed.size();
+                        block.original_size = (uint32_t)quantized.size();
+                        block.quant_type = quant_type;
+                        block.offset = 0;
+                        blocks.push_back(block);
+                        compressed_blocks.push_back(std::move(compressed));
+                    }
+                }
+            }
+            
+            // FFN norm - matrix_id = 8
+            std::string ffn_norm_name = tensor_name_ffn_norm(gguf, l);
+            if (!ffn_norm_name.empty()) {
+                auto* info = gguf.tensor_info(ffn_norm_name);
+                if (info && info->n_dims == 1) {
+                    std::vector<float> weights = gguf.dequantize_tensor(ffn_norm_name);
+                    if (!weights.empty()) {
+                        auto quantized = quantizer.quantize_matrix(weights.data(), 1, (uint32_t)weights.size(), quant_type);
+                        auto compressed = quantizer.compress_block(quantized);
+                        WeightBlock block;
+                        block.layer_id = l;
+                        block.matrix_id = 8;
+                        block.n_rows = 1;
+                        block.n_cols = (uint32_t)weights.size();
+                        block.compressed_size = (uint32_t)compressed.size();
+                        block.original_size = (uint32_t)quantized.size();
+                        block.quant_type = quant_type;
+                        block.offset = 0;
+                        blocks.push_back(block);
+                        compressed_blocks.push_back(std::move(compressed));
+                    }
+                }
+            }
+        }
+    }
+
+
     if (quantizer.write_squeeze(output_path, blocks, compressed_blocks, cfg)) {
         std::cout << "\nOK Wrote " << output_path << "\n";
         std::cout << "  " << blocks.size() << " weight blocks\n";

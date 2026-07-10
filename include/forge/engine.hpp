@@ -73,6 +73,9 @@ public:
 
     const ModelConfig& config() const { return config_; }
 
+    // Load norm weights directly from GGUF file (fallback if not in .squeeze)
+    bool load_norm_weights_from_gguf(const std::string& gguf_path);
+
 private:
     ModelConfig config_;
     std::unique_ptr<WeightLoader> loader_;
