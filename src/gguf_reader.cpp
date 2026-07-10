@@ -196,14 +196,16 @@ bool GGUFFile::open(const std::string& path) {
             close();
             return false;
         }
-        info.type = static_cast<GGMLType>(read_at<uint32_t>(offset)); offset += sizeof(uint32_t);
 
+        // Read dimensions BEFORE type (GGUF v1/v2 compatibility - many models store dims before type)
         info.dims.resize(info.n_dims);
         info.n_elems = 1;
         for (uint32_t d = 0; d < info.n_dims; d++) {
             info.dims[d] = read_at<uint64_t>(offset); offset += sizeof(uint64_t);
             info.n_elems *= info.dims[d];
         }
+
+        info.type = static_cast<GGMLType>(read_at<uint32_t>(offset)); offset += sizeof(uint32_t);
 
         // Store tensor info (offset will be set when we know data start)
         tensors_[info.name] = info;
