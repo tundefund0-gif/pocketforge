@@ -101,6 +101,12 @@ private:
     std::vector<float> scores_;  // attention scores buffer
     std::vector<float> attn_scores_out_;
 
+    // RoPE precomputed tables
+    std::vector<float> rope_sin_;
+    std::vector<float> rope_cos_;
+    float rope_theta_ = 10000.0f;
+    bool rope_initialized_ = false;
+
     // MTP buffers
     std::vector<float> verify_hidden_;
     std::vector<float> verify_logits_;

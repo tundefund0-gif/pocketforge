@@ -98,6 +98,16 @@ bool Engine::load_model(const std::string& squeezef_path) {
     }
     ffn_out_.resize(config_.n_embd, 0.0f);
     normed_.resize(config_.n_embd, 0.0f);
+
+    // Precompute RoPE tables
+    {
+        uint32_t hd = config_.head_dim();
+        rope_theta_ = 10000.0f;  // default
+        // Try to read from config metadata (set during load_model)
+        rope_sin_.resize(hd);
+        rope_cos_.resize(hd);
+        rope_initialized_ = false;
+    }
     last_hidden_.resize(config_.n_embd, 0.0f);
     verify_hidden_.resize(config_.n_embd, 0.0f);
     verify_logits_.resize(config_.n_vocab, 0.0f);
@@ -533,6 +543,37 @@ void Engine::compute_attention(uint32_t layer_id, const float* input,
     uint32_t n_embd = config_.n_embd;
     uint32_t head_dim = config_.head_dim();
 
+    // Compute RoPE sin/cos for current position on-the-fly
+    // Precompute freqs once, cache them for efficiency
+    // For now, compute on every call (inexpensive for single token)
+    float rope_theta = rope_theta_;
+    {
+        if (!rope_initialized_) {
+            rope_theta_ = 5000000.0f; // default for MiniCPM5
+            for (uint32_t i = 0; i < head_dim; i += 2) {
+                float freq = 1.0f / std::pow(rope_theta_, (float)i / (float)head_dim);
+                rope_sin_[i] = std::sin((float)token_pos * freq);
+                rope_cos_[i] = std::cos((float)token_pos * freq);
+                if (i + 1 < head_dim) {
+                    rope_sin_[i + 1] = rope_sin_[i];
+                    rope_cos_[i + 1] = rope_cos_[i];
+                }
+            }
+            rope_initialized_ = true;
+        } else {
+            // Recompute for this position (different from previous)
+            for (uint32_t i = 0; i < head_dim; i += 2) {
+                float freq = 1.0f / std::pow(rope_theta_, (float)i / (float)head_dim);
+                rope_sin_[i] = std::sin((float)token_pos * freq);
+                rope_cos_[i] = std::cos((float)token_pos * freq);
+                if (i + 1 < head_dim) {
+                    rope_sin_[i + 1] = rope_sin_[i];
+                    rope_cos_[i + 1] = rope_cos_[i];
+                }
+            }
+        }
+    }
+
     std::fill(attn_out_.begin(), attn_out_.end(), 0.0f);
 
     // Try to load real weights
@@ -573,6 +614,31 @@ void Engine::compute_attention(uint32_t layer_id, const float* input,
             q_buf_[i] = input[i] * 0.1f;
             k_buf_[i] = input[i] * 0.1f;
             v_buf_[i] = input[i] * 0.1f;
+        }
+    }
+
+    // Apply RoPE to Q and K vectors
+    {
+        // Use the precomputed sin/cos for the current position
+        // q_buf_ has n_heads * head_dim elements
+        // k_buf_ has n_kv_heads * head_dim elements
+        for (uint32_t h = 0; h < n_heads; h++) {
+            float* q_head = q_buf_.data() + h * head_dim;
+            uint32_t kv_head = h % n_kv_heads;
+            float* k_head = k_buf_.data() + kv_head * head_dim;
+            
+            for (uint32_t i = 0; i < head_dim; i += 2) {
+                float q0 = q_head[i];
+                float q1 = (i + 1 < head_dim) ? q_head[i + 1] : 0.0f;
+                float k0 = k_head[i];
+                float k1 = (i + 1 < head_dim) ? k_head[i + 1] : 0.0f;
+                float c = rope_cos_[i];
+                float s = rope_sin_[i];
+                q_head[i] = q0 * c - q1 * s;
+                if (i + 1 < head_dim) q_head[i + 1] = q0 * s + q1 * c;
+                k_head[i] = k0 * c - k1 * s;
+                if (i + 1 < head_dim) k_head[i + 1] = k0 * s + k1 * c;
+            }
         }
     }
 
