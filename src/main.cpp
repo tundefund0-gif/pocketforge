@@ -1,4 +1,5 @@
 #include "forge/engine.hpp"
+#include "forge/gguf_reader.hpp"
 #include "forge/matmul_neon.hpp"
 #include <iostream>
 #include <chrono>
@@ -41,6 +42,7 @@ int main(int argc, char** argv) {
         else if (arg == "--temp" && i + 1 < argc) sampling.temperature = (float)std::atof(argv[++i]);
         else if (arg == "--top-k" && i + 1 < argc) sampling.top_k = (uint32_t)std::atoi(argv[++i]);
         else if (arg == "--top-p" && i + 1 < argc) sampling.top_p = (float)std::atof(argv[++i]);
+        else if (arg == "--gguf" && i + 1 < argc) { /* skip, handled later */ }
         else if (arg == "--greedy") sampling.greedy = true;
         else if (arg == "--benchmark") benchmark = true;
     }
@@ -68,6 +70,30 @@ int main(int argc, char** argv) {
 
     engine.set_mtp_enabled(mtp_enabled);
     engine.set_layer_skip_threshold(skip_threshold);
+
+    // Load tokenizer from GGUF for text decoding
+    forge::GGUFFile tokenizer_file;
+    std::string gguf_src;
+    for (int i = 2; i < argc; i++) {
+        if (std::string(argv[i]) == "--gguf" && i + 1 < argc) gguf_src = argv[++i];
+    }
+    if (gguf_src.empty()) {
+        // Try replacing .squeeze with .q8.gguf
+        gguf_src = model_path;
+        if (gguf_src.size() > 8 && gguf_src.substr(gguf_src.size()-8) == ".squeeze") {
+            gguf_src = gguf_src.substr(0, gguf_src.size()-8) + ".q8.gguf";
+        }
+    }
+    bool has_token_decoder = false;
+    if (!gguf_src.empty() && tokenizer_file.open(gguf_src)) {
+        has_token_decoder = tokenizer_file.has_token_strings();
+        if (has_token_decoder) {
+            std::cout << "Tokenizer: " << (int)tokenizer_file.token_strings_size() << " tokens loaded\n";
+        }
+    }
+    if (!has_token_decoder) {
+        std::cout << "Tokenizer: not loaded (use --gguf <file.gguf>)\n";
+    }
 
     // Tokenize prompt (placeholder: simple char-level for testing)
     std::vector<int32_t> prompt_tokens;
@@ -117,12 +143,19 @@ int main(int argc, char** argv) {
         std::cout << "Generating...\n\n";
 
         auto result = engine.generate(prompt_tokens, max_tokens,
-            [](int32_t token, float prob) {
-                // Print token (simple ASCII filter for testing)
-                if (token >= 32 && token < 127) {
-                    std::cout << (char)token;
+            [&](int32_t token, float prob) {
+                // Decode token using loaded tokenizer
+                std::string decoded;
+                if (has_token_decoder) {
+                    decoded = tokenizer_file.token_str(token);
+                    // Output raw token string (terminal handles UTF-8/byte display)
+                    std::cout << decoded;
                 } else {
-                    std::cout << "[" << token << "]";
+                    if (token >= 32 && token < 127) {
+                        std::cout << (char)token;
+                    } else {
+                        std::cout << "[" << token << "]";
+                    }
                 }
                 std::cout.flush();
             },

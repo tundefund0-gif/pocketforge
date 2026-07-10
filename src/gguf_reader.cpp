@@ -163,8 +163,18 @@ bool GGUFFile::open(const std::string& path) {
             case GGUF_TYPE_ARRAY: {
                 GGUFValueType arr_type = static_cast<GGUFValueType>(read_at<uint32_t>(offset)); offset += sizeof(uint32_t);
                 uint64_t arr_len = read_at<uint64_t>(offset); offset += sizeof(uint64_t);
+                // Store tokenizer.ggml.tokens array for decoding
+                bool store_tokens = (key == "tokenizer.ggml.tokens" && arr_type == GGUF_TYPE_STRING);
+                if (store_tokens) {
+                    token_strings_.reserve((size_t)arr_len);
+                }
                 for (uint64_t j = 0; j < arr_len; j++) {
-                    skip_value(offset, arr_type);
+                    if (store_tokens && arr_type == GGUF_TYPE_STRING) {
+                        std::string tok = read_string(offset);
+                        token_strings_.push_back(tok);
+                    } else {
+                        skip_value(offset, arr_type);
+                    }
                 }
                 break;
             }

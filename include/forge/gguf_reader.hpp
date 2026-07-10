@@ -114,6 +114,14 @@ public:
     // List all tensor names
     std::vector<std::string> list_tensors() const;
 
+    // Get token string by id (for decoding)
+    std::string token_str(int32_t id) const {
+        if (id >= 0 && id < (int32_t)token_strings_.size()) return token_strings_[id];
+        return "";
+    }
+    bool has_token_strings() const { return !token_strings_.empty(); }
+    size_t token_strings_size() const { return token_strings_.size(); }
+
     // Populate ModelConfig from GGUF metadata
     ModelConfig read_config() const;
 
@@ -135,6 +143,7 @@ private:
     std::unordered_map<std::string, int64_t> metadata_int_;
     std::unordered_map<std::string, float> metadata_float_;
     std::unordered_map<std::string, GGUFTensorInfo> tensors_;
+    std::vector<std::string> token_strings_;  // tokenizer.ggml.tokens
 
     // Parsing helpers
     // memcpy-based read (safe on ARM32 where unaligned access causes SIGBUS)
