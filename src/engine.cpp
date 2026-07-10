@@ -113,7 +113,7 @@ bool Engine::load_model(const std::string& squeezef_path) {
         size_t emb_bytes_reduced = (size_t)embed_vocab * config_.n_embd;
         if (emb_bytes_reduced + get_memory_stats().total() < config_.max_memory) {
             embedding_table_.resize((size_t)embed_vocab * config_.n_embd);
-            embedding_table_.resize(config_.n_vocab * config_.n_embd);
+            // (embedded above with limited vocab)
             for (size_t i = 0; i < embedding_table_.size(); i++) {
                 embedding_table_[i] = ((float)(i * 2654435761ULL % 10000) / 10000.0f - 0.5f) * 0.02f;
             }
@@ -132,7 +132,7 @@ bool Engine::load_model(const std::string& squeezef_path) {
     {
         auto emb_block = loader_->load_block_with_scales(0, 10);
         if (!emb_block.data.empty()) {
-            uint32_t emb_vocab = config_.n_vocab;
+            uint32_t emb_vocab = std::min(config_.n_vocab, (uint32_t)16384);
             uint32_t emb_dim = config_.n_embd;
             // Dequantize to float for now (can optimize later)
             embedding_table_.resize((size_t)emb_vocab * emb_dim);
