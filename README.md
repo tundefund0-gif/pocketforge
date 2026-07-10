@@ -2,7 +2,7 @@
 
 **Custom LLM inference engine for 1B models — runs on 32-bit ARM phones with <250 MB RAM**
 
-PocketForge is a from-scratch C++ inference engine built for resource-constrained devices. It achieves **131K context length** and **low-latency generation** on phones with as little as 250 MB RAM by using:
+PocketForge is a from-scratch C++ inference engine built for resource-constrained devices. It achieves **8K context length** (configurable) and **low-latency generation** on phones with as little as 250 MB RAM by using:
 - Mixed-precision weight quantization (Q4/Q2/Q1.5 per-matrix)
 - Streaming mmap-based weight loading (never loads full model)
 - 3-tier KV cache (sink + sliding window + pooled history) for 131K context at ~120 MB
@@ -48,12 +48,12 @@ PocketForge is a from-scratch C++ inference engine built for resource-constraine
 
 | Component | Size |
 |-----------|------|
-| KV cache (3-tier int8) | ~120 MB |
-| MTP heads (4× Q4) | ~24 MB |
-| Activations + scratch | ~160 KB |
+| KV cache (3-tier int8, 8K context) | ~78 MB |
+| MTP heads (4× Q4) | ~14 MB |
+| Activations + scratch | ~666 KB |
 | Prefetch buffer | ~4 MB |
-| Embedding table (tied) | ~2 MB |
-| **Total** | **~150 MB** ✓ |
+| Embedding table (tied, 16K vocab) | ~98 MB |
+| **Total (measured on 32-bit ARM)** | **~187 MB** ✓ (<250 MB) |
 
 ## Features
 
