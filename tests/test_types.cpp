@@ -23,19 +23,19 @@ int main() {
     // ModelConfig
     forge::ModelConfig cfg;
     TEST("Default n_layers", cfg.n_layers == 24);
-    TEST("Default n_embd", cfg.n_embd == 2048);
-    TEST("Default n_heads", cfg.n_heads == 32);
-    TEST("Default n_kv_heads", cfg.n_kv_heads == 4);
-    TEST("Default n_ff", cfg.n_ff == 8192);
-    TEST("Default n_vocab", cfg.n_vocab == 32000);
+    TEST("Default n_embd", cfg.n_embd == 1536);
+    TEST("Default n_heads", cfg.n_heads == 16);
+    TEST("Default n_kv_heads", cfg.n_kv_heads == 2);
+    TEST("Default n_ff", cfg.n_ff == 4608);
+    TEST("Default n_vocab", cfg.n_vocab == 130560);
     TEST("Default max_seq_len", cfg.max_seq_len == 131072);
     TEST("Default mtp_heads", cfg.mtp_heads == 4);
     TEST("Default skip_interval", cfg.skip_interval == 4);
     TEST("Default max_memory", cfg.max_memory == 250 * 1024 * 1024);
 
     // Derived
-    TEST("head_dim()", cfg.head_dim() == 64);
-    TEST("kv_head_dim()", cfg.kv_head_dim() == 512);
+    TEST("head_dim()", cfg.head_dim() == 96); // 1536/16 when head_dim_=0
+    TEST("kv_head_dim()", cfg.kv_head_dim() == 768); // 1536/2 when head_dim_=0
 
     // Q8_0 size
     forge::Q8_0 q8;

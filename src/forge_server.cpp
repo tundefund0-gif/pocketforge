@@ -49,81 +49,105 @@ static std::vector<forge::ToolDef> parse_tools(const forge::JsonValue& body) {
     return tools;
 }
 
-// Build prompt from messages array, injecting tools into system message
+// Build prompt from messages array using MiniCPM5 XML format
+// Format: <user>...</user>\n<tools>{\"name\":...,\"description\":...}</tools>\n<calls>
+// Tool output format: <function name="x"><param name="y">z</param></function>
 static std::string build_chat_prompt(
     const forge::JsonValue& messages,
     const std::vector<forge::ToolDef>& tools
 ) {
     if (messages.type != forge::JsonValue::ARRAY) return "";
 
-    std::string system_prompt;
+    std::string system_content;
     std::string conversation;
 
-    // First pass: find the system message and collect all messages
+    // First pass: extract system message
     for (const auto& msg : messages.array_val) {
         std::string role = msg.get("role").string_val;
-        std::string content = msg.get("content").string_val;
-
         if (role == "system") {
-            system_prompt = content;
+            system_content = msg.get("content").string_val;
         }
     }
 
-    // Inject tool descriptions into system prompt
-    if (!tools.empty()) {
-        std::string tool_prompt = forge::ToolPromptBuilder::build(system_prompt, tools);
-        if (tool_prompt != system_prompt) {
-            system_prompt = tool_prompt;
-        }
+    // Build the MiniCPM5 format prompt
+    std::string result;
+
+    // Add system in <system> tag
+    if (!system_content.empty()) {
+        result += "<system>" + system_content + "</system>\n";
     }
 
-    // Second pass: build conversation string
+    // Add user messages
     for (const auto& msg : messages.array_val) {
         std::string role = msg.get("role").string_val;
-        std::string content = msg.get("content").string_val;
-        std::string name = msg.get("name").string_val;
 
-        // Handle tool call responses
-        bool is_tool_response = (role == "tool");
-        if (is_tool_response) {
-            std::string tool_call_id = msg.get("tool_call_id").string_val;
-            if (!conversation.empty()) conversation += "\n";
-            conversation += "[TOOL_RESULT: " + tool_call_id + "]\n" + content + "\n[/TOOL_RESULT]";
-            continue;
+        if (role == "system") continue;
+
+        if (role == "user") {
+            std::string content = msg.get("content").string_val;
+            result += "<user>" + content + "</user>\n";
         }
+        else if (role == "assistant") {
+            std::string content = msg.get("content").string_val;
+            bool has_tool_calls = msg.has("tool_calls");
 
-        // Handle assistant messages with tool_calls
-        bool has_tool_calls = (role == "assistant" && msg.has("tool_calls"));
-        if (has_tool_calls) {
-            if (!conversation.empty()) conversation += "\n";
-            conversation += "assistant: ";
-            if (!content.empty()) conversation += content + " ";
-
-            auto tool_calls_arr = msg.get("tool_calls");
-            if (tool_calls_arr.type == forge::JsonValue::ARRAY) {
-                for (const auto& tc : tool_calls_arr.array_val) {
-                    auto fn = tc.get("function");
-                    std::string fn_name = fn.get("name").string_val;
-                    std::string fn_args = fn.get("arguments").string_val;
-                    conversation += "{\"name\": \"" + fn_name + "\", \"arguments\": " + fn_args + "} ";
+            if (has_tool_calls) {
+                result += "<assistant>";
+                if (!content.empty()) result += content;
+                auto tool_calls_arr = msg.get("tool_calls");
+                if (tool_calls_arr.type == forge::JsonValue::ARRAY) {
+                    for (const auto& tc : tool_calls_arr.array_val) {
+                        auto fn = tc.get("function");
+                        std::string fn_name = fn.get("name").string_val;
+                        std::string fn_args_str = fn.get("arguments").string_val;
+                        result += "<function name=\"" + fn_name + "\">";
+                        // Parse JSON arguments and convert to XML params
+                        auto args_val = forge::JsonValue::parse(fn_args_str);
+                        if (args_val.type == forge::JsonValue::OBJECT) {
+                            for (const auto& [k, v] : args_val.object_val) {
+                                result += "<param name=\"" + k + "\">";
+                                if (v.type == forge::JsonValue::STRING) {
+                                    result += v.string_val;
+                                } else {
+                                    result += v.serialize();
+                                }
+                                result += "</param>";
+                            }
+                        }
+                        result += "</function>";
+                    }
                 }
+                result += "</assistant>\n";
             }
-            continue;
+            else if (role == "assistant" && !content.empty()) {
+                result += "<assistant>" + content + "</assistant>\n";
+            }
         }
-
-        // Normal messages
-        std::string prefix = (role == "system") ? "system" : role;
-        if (!conversation.empty()) conversation += "\n";
-        conversation += prefix + ": " + content;
+        else if (role == "tool") {
+            std::string tool_call_id = msg.get("tool_call_id").string_val;
+            std::string content = msg.get("content").string_val;
+            // Tool responses as <tool_response> tag
+            result += "<tool_response>" + content + "</tool_response>\n";
+        }
     }
 
-    // If we have a system prompt, prepend it
-    std::string result;
-    if (!system_prompt.empty()) {
-        result = "system: " + system_prompt + "\n\n" + conversation;
-    } else {
-        result = conversation;
+    // Add tool definitions if present
+    if (!tools.empty()) {
+        result += "<tools>";
+        for (size_t i = 0; i < tools.size(); i++) {
+            if (i > 0) result += "\n";
+            result += "{\"name\":\"" + tools[i].name + "\",";
+            result += "\"description\":\"" + tools[i].description + "\"";
+            if (!tools[i].parameters_json.empty()) {
+                result += ",\"parameters\":" + tools[i].parameters_json;
+            }
+            result += "}";
+        }
+        result += "</tools>\n";
     }
+
+    // Add <calls> tag to trigger tool call generation
+    result += "<calls>";
 
     return result;
 }

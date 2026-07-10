@@ -86,8 +86,8 @@ struct ToolChoice {
 // ============================================================
 
 struct ToolPromptBuilder {
-    // Build a system prompt that injects tool definitions
-    // Uses the same format as llama.cpp's server
+    // Build prompt with tool definitions for MiniCPM5 XML format
+    // Format: <tools>{...tools...}</tools>\n<calls>
     static std::string build(
         const std::string& base_system,
         const std::vector<ToolDef>& tools,
@@ -96,50 +96,43 @@ struct ToolPromptBuilder {
         if (tools.empty() || choice.policy == ToolChoice::NONE) {
             return base_system;
         }
-
         std::string prompt;
-        if (!base_system.empty()) {
-            prompt = base_system + "\n\n";
-        }
-        prompt += "You have access to the following functions:\n\n";
-        for (const auto& tool : tools) {
-            prompt += tool.to_prompt_entry() + "\n\n";
-        }
-
         if (choice.policy == ToolChoice::REQUIRED && !choice.function_name.empty()) {
-            prompt += "You MUST call the function: " + choice.function_name + ".\n";
-            prompt += "Respond with ONLY a JSON object matching that function's schema.\n";
-        } else {
-            prompt += "To call a function, respond with a JSON object in this format:\n";
-            prompt += "{\"name\": \"function_name\", \"arguments\": {\"arg1\": \"value1\", ...}}\n";
-            prompt += "\nOtherwise, respond with a normal message.\n";
+            prompt += "You must call the '" + choice.function_name + "' function. ";
         }
+        if (!base_system.empty()) {
+            prompt += base_system + " ";
+        }
+        prompt += "<tools>";
+        for (size_t i = 0; i < tools.size(); i++) {
+            if (i > 0) prompt += "\n";
+            prompt += "{\"name\":\"" + tools[i].name + "\",";
+            prompt += "\"description\":\"" + tools[i].description + "\"";
+            if (!tools[i].parameters_json.empty()) {
+                prompt += ",\"parameters\":" + tools[i].parameters_json;
+            }
+            prompt += "}";
+        }
+        prompt += "</tools>\n";
+        prompt += "<calls>";
         return prompt;
     }
 
-    // Parse tool_choice from request body (handles string and object forms)
     static ToolChoice parse_tool_choice(const std::string& value_json) {
         ToolChoice choice;
-
-        // Try string form: "auto", "none", "required"
-        if (value_json == "\"auto\"") {
-            choice.policy = ToolChoice::AUTO;
-        } else if (value_json == "\"none\"") {
-            choice.policy = ToolChoice::NONE;
-        } else if (value_json == "\"required\"") {
-            choice.policy = ToolChoice::REQUIRED;
-        } else if (!value_json.empty() && value_json[0] == '{') {
-            // Object form: {"type": "function", "function": {"name": "..."}}
-            // Simple string scan for "name"
+        if (value_json == "\"auto\"") choice.policy = ToolChoice::AUTO;
+        else if (value_json == "\"none\"") choice.policy = ToolChoice::NONE;
+        else if (value_json == "\"required\"") choice.policy = ToolChoice::REQUIRED;
+        else if (!value_json.empty() && value_json[0] == '{') {
             auto name_pos = value_json.find("\"name\"");
             if (name_pos != std::string::npos) {
                 auto colon = value_json.find(':', name_pos + 6);
                 if (colon != std::string::npos) {
-                    auto quote1 = value_json.find('"', colon + 1);
-                    if (quote1 != std::string::npos) {
-                        auto quote2 = value_json.find('"', quote1 + 1);
-                        if (quote2 != std::string::npos) {
-                            choice.function_name = value_json.substr(quote1 + 1, quote2 - quote1 - 1);
+                    auto q1 = value_json.find('"', colon + 1);
+                    if (q1 != std::string::npos) {
+                        auto q2 = value_json.find('"', q1 + 1);
+                        if (q2 != std::string::npos) {
+                            choice.function_name = value_json.substr(q1 + 1, q2 - q1 - 1);
                             choice.policy = ToolChoice::REQUIRED;
                         }
                     }
@@ -149,137 +142,67 @@ struct ToolPromptBuilder {
         return choice;
     }
 
-    // Try to parse output as a tool call JSON (pure string-based, no deps)
-    // Handles: standard JSON, surrounded by text, markdown code blocks
-    // Supports both {"name": "...", "arguments": ...} and {"function": "...", "arguments": ...}
+    // Detect tool calls in MiniCPM5 XML format
+    // Parses: <function name="tool_name"><param name="arg">value</param></function>
     static bool detect_tool_call(
         const std::string& output,
         std::vector<ToolCall>& calls_out
     ) {
         if (output.empty()) return false;
-
-        std::string cleaned = output;
-
-        // Strip markdown code blocks if present
-        auto strip_markdown = [](std::string& s) {
-            auto start = s.find("```");
-            while (start != std::string::npos) {
-                auto end = s.find("```", start + 3);
-                if (end == std::string::npos) break;
-                // Extract content between code fences
-                auto content_start = s.find('\n', start) + 1;
-                if (content_start == std::string::npos || content_start > end) {
-                    content_start = start + 3;
-                    // Skip language identifier
-                    auto nl = s.find('\n', content_start);
-                    if (nl != std::string::npos && nl < end) content_start = nl + 1;
-                }
-                std::string code_content = s.substr(content_start, end - content_start);
-                s = s.substr(0, start) + code_content + s.substr(end + 3);
-                start = s.find("```");
+        size_t pos = 0;
+        int max_calls = 10;
+        int found = 0;
+        while (found < max_calls) {
+            auto fn_start = output.find("<function", pos);
+            if (fn_start == std::string::npos) break;
+            auto name_pos = output.find("name=\"", fn_start);
+            if (name_pos == std::string::npos || name_pos > fn_start + 100) { pos = fn_start + 9; continue; }
+            auto name_start = name_pos + 6;
+            auto name_end = output.find('"', name_start);
+            if (name_end == std::string::npos) break;
+            std::string fn_name = output.substr(name_start, name_end - name_start);
+            if (fn_name.empty()) { pos = name_end + 1; continue; }
+            auto fn_close = output.find("</function>", fn_start);
+            if (fn_close == std::string::npos) break;
+            auto content_start = output.find('>', fn_start);
+            if (content_start == std::string::npos || content_start >= fn_close) break;
+            content_start++;
+            std::string inner = output.substr(content_start, fn_close - content_start);
+            std::string args_json = "{";
+            size_t ppos = 0;
+            bool first_arg = true;
+            while (true) {
+                auto param_start = inner.find("<param", ppos);
+                if (param_start == std::string::npos) break;
+                auto pname_pos = inner.find("name=\"", param_start);
+                if (pname_pos == std::string::npos || pname_pos > param_start + 100) { ppos = param_start + 6; continue; }
+                auto pname_start = pname_pos + 6;
+                auto pname_end = inner.find('"', pname_start);
+                if (pname_end == std::string::npos) break;
+                std::string pname = inner.substr(pname_start, pname_end - pname_start);
+                auto pcontent_start = inner.find('>', pname_end);
+                if (pcontent_start == std::string::npos) break;
+                pcontent_start++;
+                auto pclose = inner.find("</param>", pcontent_start);
+                if (pclose == std::string::npos) break;
+                std::string pvalue = inner.substr(pcontent_start, pclose - pcontent_start);
+                if (!first_arg) args_json += ",";
+                args_json += "\"" + pname + "\":\"" + pvalue + "\"";
+                first_arg = false;
+                ppos = pclose + 8;
             }
-        };
-        strip_markdown(cleaned);
-
-        // Find outermost JSON object
-        auto brace_start = cleaned.find('{');
-        if (brace_start == std::string::npos) return false;
-
-        // Count braces to find matching close
-        int depth = 0;
-        size_t brace_end = cleaned.size();
-        for (size_t i = brace_start; i < cleaned.size(); i++) {
-            if (cleaned[i] == '{') depth++;
-            else if (cleaned[i] == '}') {
-                depth--;
-                if (depth == 0) { brace_end = i; break; }
-            }
+            args_json += "}";
+            ToolCall call;
+            call.id = "call_" + std::to_string(time(nullptr));
+            call.function_name = fn_name;
+            call.function_args = args_json;
+            calls_out.push_back(call);
+            found++;
+            pos = fn_close + 11;
         }
-        if (depth != 0) return false;
-
-        std::string json_str = cleaned.substr(brace_start, brace_end - brace_start + 1);
-
-        // Helper: find JSON string value for a given key
-        auto get_json_string_value = [](const std::string& j, const std::string& key) -> std::string {
-            auto key_pos = j.find("\"" + key + "\"");
-            if (key_pos == std::string::npos) return "";
-            auto colon = j.find(':', key_pos + key.size() + 2);
-            if (colon == std::string::npos) return "";
-            auto val_start = j.find_first_not_of(" \t\r\n", colon + 1);
-            if (val_start == std::string::npos || j[val_start] != '"') return "";
-            auto val_end = j.find('"', val_start + 1);
-            if (val_end == std::string::npos) return "";
-            return j.substr(val_start + 1, val_end - val_start - 1);
-        };
-
-        // Helper: find JSON value after a key (for objects or strings)
-        auto get_json_value_after_key = [](const std::string& j, const std::string& key) -> std::string {
-            auto key_pos = j.find("\"" + key + "\"");
-            if (key_pos == std::string::npos) return "";
-            auto colon = j.find(':', key_pos + key.size() + 2);
-            if (colon == std::string::npos) return "";
-            auto val_start = j.find_first_not_of(" \t\r\n", colon + 1);
-            if (val_start == std::string::npos) return "";
-
-            if (j[val_start] == '{') {
-                int d = 0;
-                size_t end = val_start;
-                for (; end < j.size(); end++) {
-                    if (j[end] == '{') d++;
-                    else if (j[end] == '}') { d--; if (d == 0) break; }
-                }
-                if (d == 0) return j.substr(val_start, end - val_start + 1);
-            } else if (j[val_start] == '"') {
-                auto end = j.find('"', val_start + 1);
-                if (end != std::string::npos) return j.substr(val_start, end - val_start + 1);
-            }
-            return "";
-        };
-
-        // Try "name" field first (standard format)
-        std::string fn_name = get_json_string_value(json_str, "name");
-
-        // Fallback: try "function" field (alternative format used by some models)
-        if (fn_name.empty()) {
-            fn_name = get_json_string_value(json_str, "function");
-        }
-
-        if (fn_name.empty()) return false;
-
-        // Get arguments
-        std::string args_str = get_json_value_after_key(json_str, "arguments");
-        if (args_str.empty()) {
-            // Try "params" or "parameters" as fallback
-            args_str = get_json_value_after_key(json_str, "params");
-            if (args_str.empty()) {
-                args_str = get_json_value_after_key(json_str, "parameters");
-            }
-        }
-
-        ToolCall call;
-        call.id = "call_" + std::to_string(time(nullptr));
-        call.function_name = fn_name;
-        call.function_args = args_str.empty() ? "{}" : args_str;
-        calls_out.push_back(call);
-
-        // Check if there's another JSON object after this one (multiple calls)
-        std::string remaining = cleaned.substr(brace_end + 1);
-        auto next_brace = remaining.find('{');
-        if (next_brace != std::string::npos) {
-            // Recursively find more tool calls (max 10 to prevent stack overflow)
-            static int depth_limit = 0;
-            if (depth_limit < 10) {
-                depth_limit++;
-                detect_tool_call(remaining, calls_out);
-                depth_limit--;
-            }
-        }
-
-        return true;
+        return found > 0;
     }
-};
-
-struct WeightBlock {
+};struct WeightBlock {
     uint32_t layer_id;
     uint32_t matrix_id;
     uint32_t n_rows;
@@ -297,11 +220,12 @@ struct WeightBlock {
 struct ModelConfig {
     // Architecture (1B-scale)
     uint32_t n_layers       = 24;
-    uint32_t n_embd         = 2048;
-    uint32_t n_heads        = 32;
-    uint32_t n_kv_heads     = 4;    // GQA
-    uint32_t n_ff           = 8192;
-    uint32_t n_vocab        = 32000;
+    uint32_t n_embd         = 1536;
+    uint32_t n_heads        = 16;
+    uint32_t n_kv_heads     = 2;    // GQA
+    uint32_t n_ff           = 4608;
+    uint32_t n_vocab        = 130560;
+    uint32_t head_dim_      = 0;    // 0 = auto (n_embd/n_heads); set explicitly for non-standard
 
     // Memory-safe defaults
     uint32_t max_seq_len    = 131072; // 131K context
@@ -320,8 +244,10 @@ struct ModelConfig {
     bool     use_bpe        = false;  // false = char-level ASCII fallback
 
     // Derived
-    uint32_t head_dim()    const { return n_embd / n_heads; }
-    uint32_t kv_head_dim() const { return n_embd / n_kv_heads; }
+    uint32_t head_dim()    const { return head_dim_ ? head_dim_ : (n_embd / n_heads); }
+    uint32_t kv_head_dim() const {
+        return (head_dim_ && n_kv_heads) ? head_dim_ : (n_embd / n_kv_heads);
+    }
 
     // Memory budget estimate: returns OK or prints warning
     bool check_memory_budget() const;

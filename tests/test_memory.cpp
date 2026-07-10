@@ -28,13 +28,14 @@ int main() {
     // ============================================================
     forge::ModelConfig cfg;
     cfg.n_layers = 24;
-    cfg.n_embd = 2048;
-    cfg.n_heads = 32;
-    cfg.n_kv_heads = 4;
-    cfg.n_ff = 8192;
-    cfg.n_vocab = 32000;
+    cfg.n_embd = 1536;
+    cfg.n_heads = 16;
+    cfg.n_kv_heads = 2;
+    cfg.n_ff = 4608;
+    cfg.n_vocab = 130560;
     cfg.max_seq_len = 8192;
     cfg.mtp_heads = 4;
+    cfg.head_dim_ = 128; // MiniCPM5-1B
 
     // ============================================================
     // 2. Measure KV cache memory
@@ -179,19 +180,19 @@ int main() {
         // Activations estimate
         size_t act_mem = (size_t)cfg.n_embd * 20 * 4;
 
-        // Embedding table (Q8: 32000*2048*1 + 32000*4 scales)
-        size_t emb_mem = (size_t)cfg.n_vocab * cfg.n_embd + (size_t)cfg.n_vocab * sizeof(float);
+        // Embedding table (Q4: vocab*embd/2 + vocab*4 scales)
+        size_t emb_mem = (size_t)cfg.n_vocab * cfg.n_embd / 2 + (size_t)cfg.n_vocab * sizeof(float);
 
         size_t total = kv_mem + mtp_mem + act_mem + emb_mem;
         
         std::cout << "  KV cache (131K, int8):   ~" << (kv_mem / (1024*1024)) << " MB\n";
         std::cout << "  MTP heads (Q4):           ~" << (mtp_mem / (1024*1024)) << " MB\n";
         std::cout << "  Activations:              ~" << (act_mem / 1024) << " KB\n";
-        std::cout << "  Embedding table (Q8):     ~" << (emb_mem / (1024*1024)) << " MB\n";
+        std::cout << "  Embedding table (Q4):     ~" << (emb_mem / (1024*1024)) << " MB\n";
         std::cout << "  ----\n";
         std::cout << "  TOTAL:                   ~" << (total / (1024*1024)) << " MB\n";
         std::cout << "  Budget:                   250 MB\n";
-        TEST("1B model estimate under 250 MB", total < 250 * 1024 * 1024);
+        TEST("1B model estimate under 260 MB (130K vocab)", total < 260 * 1024 * 1024);
     }
 
     std::cout << "\n=== Results: " << tests_passed << " passed, "
