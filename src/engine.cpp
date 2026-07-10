@@ -86,12 +86,18 @@ bool Engine::load_model(const std::string& squeezef_path) {
     // Pre-allocate buffers
     hidden_state_.resize(config_.n_embd, 0.0f);
     residual_.resize(config_.n_embd, 0.0f);
-    attn_out_.resize(config_.n_embd, 0.0f);
+    {
+        // Attention projection buffers need head_dim-aware sizing
+        uint32_t hd = config_.head_dim();
+        uint32_t attn_sz = std::max(config_.n_heads * hd, config_.n_embd);
+        uint32_t kv_sz = std::max(config_.n_kv_heads * hd, config_.n_embd);
+        attn_out_.resize(attn_sz, 0.0f);
+        q_buf_.resize(attn_sz, 0.0f);
+        k_buf_.resize(kv_sz, 0.0f);
+        v_buf_.resize(kv_sz, 0.0f);
+    }
     ffn_out_.resize(config_.n_embd, 0.0f);
     normed_.resize(config_.n_embd, 0.0f);
-    q_buf_.resize(config_.n_embd, 0.0f);
-    k_buf_.resize(config_.n_embd, 0.0f);
-    v_buf_.resize(config_.n_embd, 0.0f);
     last_hidden_.resize(config_.n_embd, 0.0f);
     verify_hidden_.resize(config_.n_embd, 0.0f);
     verify_logits_.resize(config_.n_vocab, 0.0f);
@@ -112,12 +118,9 @@ bool Engine::load_model(const std::string& squeezef_path) {
         // If embedding table is too big, reduce vocab or skip
         size_t emb_bytes_reduced = (size_t)embed_vocab * config_.n_embd;
         if (emb_bytes_reduced + get_memory_stats().total() < config_.max_memory) {
+            // Will be filled from .squeeze data below
             embedding_table_.resize((size_t)embed_vocab * config_.n_embd);
-            // (embedded above with limited vocab)
-            for (size_t i = 0; i < embedding_table_.size(); i++) {
-                embedding_table_[i] = ((float)(i * 2654435761ULL % 10000) / 10000.0f - 0.5f) * 0.02f;
-            }
-            embeddings_loaded_ = true;
+            embeddings_loaded_ = false;
         } else {
             std::cerr << "WARNING: Embedding table too large (" 
                       << (total_emb / (1024*1024)) << " MB), skipping\n";
@@ -134,18 +137,20 @@ bool Engine::load_model(const std::string& squeezef_path) {
         if (!emb_block.data.empty()) {
             uint32_t emb_vocab = std::min(config_.n_vocab, (uint32_t)16384);
             uint32_t emb_dim = config_.n_embd;
-            // Dequantize to float for now (can optimize later)
             embedding_table_.resize((size_t)emb_vocab * emb_dim);
-            for (uint32_t v = 0; v < emb_vocab && v < 256; v++) {  // limit for memory
+            float scale = emb_block.global_scale;
+            size_t max_vals = emb_block.data.size();
+            for (uint32_t v = 0; v < emb_vocab; v++) {
                 for (uint32_t d = 0; d < emb_dim; d++) {
                     size_t idx = (size_t)v * emb_dim + d;
-                    if (idx < emb_block.data.size()) {
-                        embedding_table_[idx] = (float)emb_block.data[idx] * emb_block.global_scale;
+                    if (idx < max_vals) {
+                        embedding_table_[idx] = (float)emb_block.data[idx] * scale;
                     }
                 }
             }
             embeddings_loaded_ = true;
-            std::cout << "Loaded embedding table (" << emb_block.data.size() << " bytes)\n";
+            std::cout << "Loaded embedding table (" << emb_block.data.size() << " bytes, " 
+                      << emb_vocab << " tokens)\n";
         }
     }
 
@@ -375,8 +380,14 @@ std::vector<float> Engine::forward_with_hidden(
     //  Token embedding (with placeholder fallback)
     // ============================================================
     if (embeddings_loaded_ && (uint32_t)token < config_.n_vocab) {
-        const float* emb_row = embedding_table_.data() + token * n_embd;
-        std::memcpy(hidden_state_.data(), emb_row, n_embd * sizeof(float));
+        uint32_t embed_vocab = std::min(config_.n_vocab, (uint32_t)16384);
+        if ((uint32_t)token < embed_vocab) {
+            const float* emb_row = embedding_table_.data() + token * n_embd;
+            std::memcpy(hidden_state_.data(), emb_row, n_embd * sizeof(float));
+        } else {
+            // Out-of-range token: use zero embedding (better than random/UB)
+            std::fill(hidden_state_.begin(), hidden_state_.end(), 0.0f);
+        }
     } else {
         // Placeholder embedding
         uint64_t seed = (uint64_t)token * 2654435761ULL;
