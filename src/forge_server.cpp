@@ -1,4 +1,6 @@
 #include "forge/engine.hpp"
+#include "forge/gguf_reader.hpp"
+#include "forge/tokenizer.hpp"
 #include "forge/http_server.hpp"
 #include <iostream>
 #include <sstream>
@@ -7,6 +9,7 @@
 #include <vector>
 
 static std::unique_ptr<forge::Engine> g_engine;
+static forge::BPETokenizer g_tokenizer;
 
 // ============================================================
 //  Tool calling helpers
@@ -188,6 +191,22 @@ int main(int argc, char** argv) {
     auto stats = g_engine->get_memory_stats();
     std::cout << "Estimated RAM: " << (stats.total() / 1024 / 1024) << " MB / 250 MB\n\n";
 
+    // Load BPE tokenizer
+    std::string gguf_src = model_path;
+    if (gguf_src.size() > 8 && gguf_src.substr(gguf_src.size()-8) == ".squeeze") {
+        gguf_src = gguf_src.substr(0, gguf_src.size()-8) + ".q8.gguf";
+    }
+    forge::GGUFFile tok_file;
+    if (!gguf_src.empty() && tok_file.open(gguf_src)) {
+        if (tok_file.has_token_strings()) {
+            g_tokenizer.load_tokens(tok_file.get_token_strings());
+            if (!tok_file.get_merge_strings().empty()) {
+                g_tokenizer.load_merges(tok_file.get_merge_strings());
+            }
+            std::cout << "Tokenizer: " << tok_file.token_strings_size() << " tokens loaded\n";
+        }
+    }
+
     // Create HTTP server
     forge::HttpServer server(port);
 
@@ -244,9 +263,18 @@ int main(int argc, char** argv) {
 
             bool stream = body.get("stream").bool_val; (void)stream;
 
-            // Tokenize
+            // Tokenize using BPE tokenizer
             std::vector<int32_t> prompt_tokens;
-            for (char c : prompt) prompt_tokens.push_back((int32_t)(unsigned char)c);
+            if (g_tokenizer.is_loaded()) {
+                prompt_tokens.push_back(0); // bos_token
+                // Build chat-formatted prompt
+                std::string chat_prompt = "<|im_start|>system\nYou are a helpful AI assistant that can use tools. Always respond in English.<|im_end|>\n<|im_start|>user\n" + prompt + "<|im_end|>\n<|im_start|>assistant\n";
+                auto encoded = g_tokenizer.encode(chat_prompt);
+                prompt_tokens.insert(prompt_tokens.end(), encoded.begin(), encoded.end());
+            }
+            if (prompt_tokens.empty()) {
+                for (char c : prompt) prompt_tokens.push_back((int32_t)(unsigned char)c);
+            }
 
             std::string generated_text;
             auto result = g_engine->generate(prompt_tokens, max_tokens,
@@ -344,9 +372,18 @@ int main(int argc, char** argv) {
                 return err;
             }
 
-            // Tokenize
+            // Tokenize using BPE tokenizer
             std::vector<int32_t> prompt_tokens;
-            for (char c : prompt) prompt_tokens.push_back((int32_t)(unsigned char)c);
+            if (g_tokenizer.is_loaded()) {
+                prompt_tokens.push_back(0); // bos_token
+                // Build chat-formatted prompt
+                std::string chat_prompt = "<|im_start|>system\nYou are a helpful AI assistant that can use tools. Always respond in English.<|im_end|>\n<|im_start|>user\n" + prompt + "<|im_end|>\n<|im_start|>assistant\n";
+                auto encoded = g_tokenizer.encode(chat_prompt);
+                prompt_tokens.insert(prompt_tokens.end(), encoded.begin(), encoded.end());
+            }
+            if (prompt_tokens.empty()) {
+                for (char c : prompt) prompt_tokens.push_back((int32_t)(unsigned char)c);
+            }
 
             // Setup sampling config
             forge::SamplingConfig sampling;
@@ -360,7 +397,9 @@ int main(int argc, char** argv) {
             std::string generated_text;
             auto result = g_engine->generate(prompt_tokens, max_tokens,
                 [&](int32_t token, float prob) {
-                    if (token >= 32 && token < 127) {
+                    if (g_tokenizer.is_loaded()) {
+                        generated_text += g_tokenizer.decode(token);
+                    } else if (token >= 32 && token < 127) {
                         generated_text += (char)token;
                     } else {
                         generated_text += "\\x" + std::to_string(token);
