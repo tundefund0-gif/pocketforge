@@ -1,5 +1,6 @@
 #include "forge/engine.hpp"
 #include "forge/gguf_reader.hpp"
+#include "forge/tokenizer.hpp"
 #include "forge/matmul_neon.hpp"
 #include <iostream>
 #include <chrono>
@@ -71,34 +72,43 @@ int main(int argc, char** argv) {
     engine.set_mtp_enabled(mtp_enabled);
     engine.set_layer_skip_threshold(skip_threshold);
 
-    // Load tokenizer from GGUF for text decoding
-    forge::GGUFFile tokenizer_file;
-    std::string gguf_src;
-    for (int i = 2; i < argc; i++) {
-        if (std::string(argv[i]) == "--gguf" && i + 1 < argc) gguf_src = argv[++i];
-    }
-    if (gguf_src.empty()) {
-        // Try replacing .squeeze with .q8.gguf
-        gguf_src = model_path;
-        if (gguf_src.size() > 8 && gguf_src.substr(gguf_src.size()-8) == ".squeeze") {
-            gguf_src = gguf_src.substr(0, gguf_src.size()-8) + ".q8.gguf";
+    // Load BPE tokenizer from GGUF
+    forge::BPETokenizer tokenizer;
+    {
+        forge::GGUFFile tok_file;
+        std::string gguf_src;
+        for (int i = 2; i < argc; i++) {
+            if (std::string(argv[i]) == "--gguf" && i + 1 < argc) gguf_src = argv[++i];
+        }
+        if (gguf_src.empty()) {
+            gguf_src = model_path;
+            if (gguf_src.size() > 8 && gguf_src.substr(gguf_src.size()-8) == ".squeeze") {
+                gguf_src = gguf_src.substr(0, gguf_src.size()-8) + ".q8.gguf";
+            }
+        }
+        if (!gguf_src.empty() && tok_file.open(gguf_src)) {
+            if (tok_file.has_token_strings()) {
+                tokenizer.load_tokens(tok_file.get_token_strings());
+                if (!tok_file.get_merge_strings().empty()) {
+                    tokenizer.load_merges(tok_file.get_merge_strings());
+                }
+                std::cout << "Tokenizer: " << tok_file.token_strings_size() << " tokens loaded\n";
+            }
         }
     }
-    bool has_token_decoder = false;
-    if (!gguf_src.empty() && tokenizer_file.open(gguf_src)) {
-        has_token_decoder = tokenizer_file.has_token_strings();
-        if (has_token_decoder) {
-            std::cout << "Tokenizer: " << (int)tokenizer_file.token_strings_size() << " tokens loaded\n";
-        }
-    }
-    if (!has_token_decoder) {
+    if (!tokenizer.is_loaded()) {
         std::cout << "Tokenizer: not loaded (use --gguf <file.gguf>)\n";
     }
 
-    // Tokenize prompt (placeholder: simple char-level for testing)
+    // Tokenize prompt using BPE tokenizer (fallback to char-level)
     std::vector<int32_t> prompt_tokens;
-    for (char c : prompt) {
-        prompt_tokens.push_back((int32_t)(unsigned char)c);
+    if (tokenizer.is_loaded()) {
+        prompt_tokens = tokenizer.encode(prompt);
+    }
+    if (prompt_tokens.empty()) {
+        for (char c : prompt) {
+            prompt_tokens.push_back((int32_t)(unsigned char)c);
+        }
     }
 
     if (benchmark) {
@@ -144,11 +154,9 @@ int main(int argc, char** argv) {
 
         auto result = engine.generate(prompt_tokens, max_tokens,
             [&](int32_t token, float prob) {
-                // Decode token using loaded tokenizer
-                std::string decoded;
-                if (has_token_decoder) {
-                    decoded = tokenizer_file.token_str(token);
-                    // Output raw token string (terminal handles UTF-8/byte display)
+                // Decode token using BPETokenizer
+                if (tokenizer.is_loaded()) {
+                    std::string decoded = tokenizer.decode(token);
                     std::cout << decoded;
                 } else {
                     if (token >= 32 && token < 127) {

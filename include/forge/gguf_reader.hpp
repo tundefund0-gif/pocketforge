@@ -121,6 +121,8 @@ public:
     }
     bool has_token_strings() const { return !token_strings_.empty(); }
     size_t token_strings_size() const { return token_strings_.size(); }
+    const std::vector<std::string>& get_token_strings() const { return token_strings_; }
+    const std::vector<std::string>& get_merge_strings() const { return merge_strings_; }
 
     // Populate ModelConfig from GGUF metadata
     ModelConfig read_config() const;
@@ -144,6 +146,7 @@ private:
     std::unordered_map<std::string, float> metadata_float_;
     std::unordered_map<std::string, GGUFTensorInfo> tensors_;
     std::vector<std::string> token_strings_;  // tokenizer.ggml.tokens
+    std::vector<std::string> merge_strings_;  // tokenizer.ggml.merges
 
     // Parsing helpers
     // memcpy-based read (safe on ARM32 where unaligned access causes SIGBUS)
