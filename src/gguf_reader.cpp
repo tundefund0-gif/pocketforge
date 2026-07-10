@@ -192,6 +192,11 @@ bool GGUFFile::open(const std::string& path) {
         info.name = read_string(offset);
 
         info.n_dims = read_at<uint32_t>(offset); offset += sizeof(uint32_t);
+        if (info.n_dims == 0 || info.n_dims > 4) {
+            std::cerr << "GGUF: Invalid tensor n_dims=" << info.n_dims << " at tensor " << i << "\n";
+            close();
+            return false;
+        }
         info.type = static_cast<GGMLType>(read_at<uint32_t>(offset)); offset += sizeof(uint32_t);
 
         info.dims.resize(info.n_dims);
