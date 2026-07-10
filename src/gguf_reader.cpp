@@ -207,13 +207,18 @@ bool GGUFFile::open(const std::string& path) {
 
         info.type = static_cast<GGMLType>(read_at<uint32_t>(offset)); offset += sizeof(uint32_t);
 
+        // Skip the data_offset field (GGUF v1/v2 compatibility - uint64 after type)
+        // Some converters use v1-style format even with version=3 in header
+        uint64_t data_offset_field = read_at<uint64_t>(offset); offset += sizeof(uint64_t);
+        (void)data_offset_field;
+
         // Store tensor info (offset will be set when we know data start)
         tensors_[info.name] = info;
     }
 
     // Calculate tensor data offsets
     // GGUF stores tensors sequentially after the index
-    uint64_t data_offset = offset;
+    uint64_t data_offset = (offset + 31) & ~31;  // Align tensor data to 32 bytes (GGUF spec)
     for (auto& [name, info] : tensors_) {
         info.offset = data_offset;
         // Calculate size based on type
