@@ -355,13 +355,15 @@ std::vector<float> Engine::forward_with_hidden(
         }
     }
 
+    // Pre-allocate norm weights vector (avoids UB with single-float pointer)
+    std::vector<float> norm_weights(n_embd, 1.0f);
+
     // ============================================================
     //  Transformer layers
     // ============================================================
     for (uint32_t l = 0; l < config_.n_layers; l++) {
         // RMSNorm
-        float norm_weight = 1.0f;
-        rmsnorm(normed_.data(), hidden_state_.data(), &norm_weight, n_embd);
+        rmsnorm(normed_.data(), hidden_state_.data(), norm_weights.data(), n_embd);
 
         // Attention
         compute_attention(l, normed_.data(), attn_out_.data(), l);
@@ -372,7 +374,7 @@ std::vector<float> Engine::forward_with_hidden(
         }
 
         // RMSNorm before FFN
-        rmsnorm(normed_.data(), hidden_state_.data(), &norm_weight, n_embd);
+        rmsnorm(normed_.data(), hidden_state_.data(), norm_weights.data(), n_embd);
 
         // Layer skip
         bool skip_ffn = false;
@@ -403,8 +405,7 @@ std::vector<float> Engine::forward_with_hidden(
     }
 
     // Final RMSNorm
-    float norm_weight = 1.0f;
-    rmsnorm(normed_.data(), hidden_state_.data(), &norm_weight, n_embd);
+    rmsnorm(normed_.data(), hidden_state_.data(), norm_weights.data(), n_embd);
 
     // ============================================================
     //  Unembed (logits)

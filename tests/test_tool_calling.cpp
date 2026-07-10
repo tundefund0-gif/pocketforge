@@ -61,7 +61,7 @@ int main() {
         TEST("Tool prompt has weather", prompt.find("get_weather") != std::string::npos);
         TEST("Tool prompt has email", prompt.find("send_email") != std::string::npos);
         TEST("Tool prompt has JSON format instruction", prompt.find("arguments") != std::string::npos);
-        TEST("Tool prompt with no system prepends correctly", prompt.find("AVAILABLE FUNCTIONS") != std::string::npos);
+        TEST("Tool prompt with no system prepends correctly", prompt.find("access to the following functions") != std::string::npos);
 
         // With base system
         std::string with_sys = forge::ToolPromptBuilder::build("You are a helpful assistant.", tools);

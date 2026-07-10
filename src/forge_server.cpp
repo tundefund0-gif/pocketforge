@@ -283,6 +283,26 @@ int main(int argc, char** argv) {
             auto tools = parse_tools(body);
             bool has_tools = !tools.empty();
 
+            // Parse tool_choice (supports "auto", "none", or {"type":"function","function":{"name":"..."}})
+            forge::ToolChoice tool_choice;
+            if (body.has("tool_choice")) {
+                auto tc_val = body.get("tool_choice");
+                if (tc_val.type == forge::JsonValue::STRING) {
+                    std::string tc_str = tc_val.string_val;
+                    if (tc_str == "none") {
+                        tool_choice.policy = forge::ToolChoice::NONE;
+                    } else if (tc_str == "required") {
+                        tool_choice.policy = forge::ToolChoice::REQUIRED;
+                    }
+                } else if (tc_val.type == forge::JsonValue::OBJECT) {
+                    tool_choice.policy = forge::ToolChoice::REQUIRED;
+                    auto fn_obj = tc_val.get("function");
+                    if (fn_obj.type == forge::JsonValue::OBJECT) {
+                        tool_choice.function_name = fn_obj.get("name").string_val;
+                    }
+                }
+            }
+
             int max_tokens = (int)body.get("max_tokens").number_val;
             if (max_tokens <= 0 || max_tokens > 4096) max_tokens = 256;
 
@@ -330,7 +350,7 @@ int main(int argc, char** argv) {
             // Try to detect tool calls in the generated text
             std::vector<forge::ToolCall> detected_calls;
             bool is_tool_call = false;
-            if (has_tools) {
+            if (has_tools && tool_choice.policy != forge::ToolChoice::NONE) {
                 is_tool_call = forge::ToolPromptBuilder::detect_tool_call(
                     generated_text, detected_calls);
             }
