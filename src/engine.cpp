@@ -101,14 +101,18 @@ bool Engine::load_model(const std::string& squeezef_path) {
     attn_scores_out_.resize(config_.kv_cache_size + 4096, 0.0f);
 
     // Embedding table (int8 quantized, per-row scaling)
-    if (config_.n_vocab <= 32000 && config_.n_embd <= 2048) {
+    // Limit vocab for low-RAM devices (32-bit phones with <256 MB)
+    uint32_t embed_vocab = std::min(config_.n_vocab, (uint32_t)16384);
+    if (embed_vocab <= 32000 && config_.n_embd <= 2048) {
         // Check if we have budget: int8 = 1 byte per weight + 4 bytes per row for scale
         size_t emb_size = (size_t)config_.n_vocab * config_.n_embd; // int8
         size_t emb_scales = (size_t)config_.n_vocab * sizeof(float);
         size_t total_emb = emb_size + emb_scales;
         
         // If embedding table is too big, reduce vocab or skip
-        if (total_emb + get_memory_stats().total() < config_.max_memory) {
+        size_t emb_bytes_reduced = (size_t)embed_vocab * config_.n_embd;
+        if (emb_bytes_reduced + get_memory_stats().total() < config_.max_memory) {
+            embedding_table_.resize((size_t)embed_vocab * config_.n_embd);
             embedding_table_.resize(config_.n_vocab * config_.n_embd);
             for (size_t i = 0; i < embedding_table_.size(); i++) {
                 embedding_table_[i] = ((float)(i * 2654435761ULL % 10000) / 10000.0f - 0.5f) * 0.02f;
@@ -146,7 +150,8 @@ bool Engine::load_model(const std::string& squeezef_path) {
     }
 
     // Pre-allocate weight cache (7 matrices per layer, initially empty)
-    weight_cache_.resize(config_.n_layers * 7);
+    // Only cache 2 layers worth of weights to save RAM (sliding window eviction)
+    weight_cache_.resize(std::max((uint32_t)2, config_.n_layers) * 7);
 
     return true;
 }
@@ -472,8 +477,23 @@ void Engine::generate_placeholder_logits(int32_t token, float* logits, uint32_t 
 
 void Engine::load_layer_weights(uint32_t layer_id) {
     if (!loader_ || loader_->num_blocks() == 0) return;
+    uint32_t max_cached = weight_cache_.size();
+    if (max_cached == 0) return;
+    
+    // Evict weights from ALL layers (keep only current layer)
+    // This keeps RAM usage to ~1 layer worth of weights instead of all 24
+    for (uint32_t i = 0; i < max_cached; i++) {
+        if (weight_cache_[i].loaded && (i / 7) != layer_id) {
+            weight_cache_[i].data.clear();
+            weight_cache_[i].data.shrink_to_fit();
+            weight_cache_[i].row_scales.clear();
+            weight_cache_[i].row_scales.shrink_to_fit();
+            weight_cache_[i].loaded = false;
+        }
+    }
+    
     uint32_t base = layer_id * 7;
-    if (base + 7 > weight_cache_.size()) return;
+    if (base + 7 > max_cached) return;
     bool all_loaded = true;
     for (uint32_t m = 0; m < 7; m++) {
         if (!weight_cache_[base + m].loaded) {
