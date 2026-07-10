@@ -213,9 +213,9 @@ int main(int argc, char** argv) {
     uint8_t quant_type = parse_quant_type(quant_type_str);
     uint8_t embed_quant = parse_quant_type(embed_quant_str);
 
-    std::cout << "=== PocketForge Quantizer ===\n";
-    std::cout << "Input:  " << input_path << "\n";
-    std::cout << "Output: " << output_path << "\n";
+    std::cout << "=== PocketForge Quantizer ===" << std::endl;
+    std::cout << "Input:  " << input_path << std::endl;
+    std::cout << "Output: " << output_path << std::endl;
 
     // ============================================================
     //  Open GGUF file
