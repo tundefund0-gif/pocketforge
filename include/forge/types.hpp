@@ -33,6 +33,22 @@ struct Q1_5 {
     uint8_t q[16];
 };
 
+struct SamplingConfig {
+    float temperature  = 0.8f;
+    float top_p        = 0.95f;
+    uint32_t top_k     = 40;
+    bool   greedy      = false;
+};
+
+struct GenerationConfig {
+    SamplingConfig sampling;
+    uint32_t max_new_tokens  = 256;
+    uint32_t max_context     = 131072;
+    bool     mtp_enabled     = true;
+    bool     stream          = false;
+    float    skip_threshold  = 0.01f;
+};
+
 struct WeightBlock {
     uint32_t layer_id;
     uint32_t matrix_id;
@@ -58,7 +74,7 @@ struct ModelConfig {
     uint32_t n_vocab        = 32000;
 
     // Memory-safe defaults
-    uint32_t max_seq_len    = 16384;  // 16K context
+    uint32_t max_seq_len    = 131072; // 131K context
     bool     mtp_enabled    = true;
     uint32_t mtp_heads      = 4;
 
@@ -67,10 +83,11 @@ struct ModelConfig {
     uint32_t skip_interval  = 4;
 
     // KV cache: slide window size (tokens kept)
-    uint32_t kv_cache_size  = 16384;  // 16K context
+    uint32_t kv_cache_size  = 8192;   // sliding window size
 
     // Hard memory cap
-    size_t   max_memory     = 250 * 1024 * 1024; // 250 MB
+        size_t   max_memory     = 250 * 1024 * 1024; // 250 MB
+    bool     use_bpe        = false;  // false = char-level ASCII fallback
 
     // Derived
     uint32_t head_dim()    const { return n_embd / n_heads; }
@@ -90,7 +107,8 @@ struct GenerationResult {
     size_t               peak_memory_bytes = 0;
     int                  mtp_accepted      = 0;
     int                  layers_skipped    = 0;
-    bool                 oom_protected     = false; // set if we hit memory cap
+        bool                 oom_protected     = false; // set if we hit memory cap
+    int                  mtp_rejected      = 0;
 };
 
 using TokenCallback = std::function<void(int32_t token, float prob)>;

@@ -30,6 +30,7 @@ int main(int argc, char** argv) {
     bool mtp_enabled = true;
     float skip_threshold = 0.01f;
     bool benchmark = false;
+    forge::SamplingConfig sampling;
 
     for (int i = 2; i < argc; i++) {
         std::string arg = argv[i];
@@ -37,6 +38,10 @@ int main(int argc, char** argv) {
         else if (arg == "--tokens" && i + 1 < argc) max_tokens = (uint32_t)std::atoi(argv[++i]);
         else if (arg == "--mtp" && i + 1 < argc) mtp_enabled = (bool)std::atoi(argv[++i]);
         else if (arg == "--skip" && i + 1 < argc) skip_threshold = (float)std::atof(argv[++i]);
+        else if (arg == "--temp" && i + 1 < argc) sampling.temperature = (float)std::atof(argv[++i]);
+        else if (arg == "--top-k" && i + 1 < argc) sampling.top_k = (uint32_t)std::atoi(argv[++i]);
+        else if (arg == "--top-p" && i + 1 < argc) sampling.top_p = (float)std::atof(argv[++i]);
+        else if (arg == "--greedy") sampling.greedy = true;
         else if (arg == "--benchmark") benchmark = true;
     }
 
@@ -55,7 +60,11 @@ int main(int argc, char** argv) {
     std::cout << "KV cache: " << cfg.n_kv_heads << " heads, "
               << cfg.max_seq_len << " max ctx\n";
     std::cout << "MTP: " << (mtp_enabled ? "enabled" : "disabled") << "\n";
-    std::cout << "Layer skip threshold: " << skip_threshold << "\n\n";
+    std::cout << "Layer skip threshold: " << skip_threshold << "\n";
+    std::cout << "Sampling: temp=" << sampling.temperature << " top-k=" << sampling.top_k
+              << " top-p=" << sampling.top_p;
+    if (sampling.greedy) std::cout << " (greedy)";
+    std::cout << "\n\n";
 
     engine.set_mtp_enabled(mtp_enabled);
     engine.set_layer_skip_threshold(skip_threshold);

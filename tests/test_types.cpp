@@ -28,7 +28,7 @@ int main() {
     TEST("Default n_kv_heads", cfg.n_kv_heads == 4);
     TEST("Default n_ff", cfg.n_ff == 8192);
     TEST("Default n_vocab", cfg.n_vocab == 32000);
-    TEST("Default max_seq_len", cfg.max_seq_len == 16384);
+    TEST("Default max_seq_len", cfg.max_seq_len == 131072);
     TEST("Default mtp_heads", cfg.mtp_heads == 4);
     TEST("Default skip_interval", cfg.skip_interval == 4);
     TEST("Default max_memory", cfg.max_memory == 250 * 1024 * 1024);

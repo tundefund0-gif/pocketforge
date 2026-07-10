@@ -9,45 +9,41 @@
 namespace forge {
 
 // ============================================================
-//  High-Context KV Cache (int8, streaming attention)
+//  3-Tier KV Cache for 131K Context
 // ============================================================
 //
-// No float32 scratch buffer — attention computed directly on int8 data.
-// Supports 16K+ context within 250MB budget.
+// Tier 1 — Sink:         first 4 tokens (never evicted, int8)
+// Tier 2 — Window:       last 8K tokens (sliding, int8)
+// Tier 3 — Pooled Hist:  between sink & window, averaged in blocks of 64
 //
-// Memory:
-//   24L × 4KV × 16384ctx × 64dim × 2(K+V) × 1B = 192 MB (int8 data)
-//   + ~2 MB working = 194 MB total
+// Attention computes scores against ALL three tiers.
+// Memory: ~120 MB for 131K context → well under 250 MB
 //
 
 struct KVCacheConfig {
-    uint32_t n_layers     = 24;
-    uint32_t n_kv_heads   = 4;
-    uint32_t head_dim     = 64;
-    uint32_t max_positions = 16384;  // 16K context
-    uint32_t n_sinks      = 4;       // attention sink tokens
-    bool     enable_sliding_window = true;
+    uint32_t n_layers       = 24;
+    uint32_t n_kv_heads     = 4;
+    uint32_t head_dim       = 64;
+    uint32_t sink_size      = 4;
+    uint32_t window_size    = 8192;
+    uint32_t pool_block     = 64;
+    uint32_t max_context    = 131072;
 };
 
 class KVCache {
 public:
     explicit KVCache(const KVCacheConfig& cfg);
 
-    // Store K/V for one position
     void store(uint32_t layer, uint32_t head, uint32_t pos,
                const float* key, const float* value);
 
-    // Compute attention scores for one query head against all stored K
-    // query: [head_dim] float  →  scores: [count] float
-    void attention_scores(
+    // Returns number of scores written
+    uint32_t attention_scores(
         uint32_t layer, uint32_t head,
         const float* query,
-        float* scores_out,
-        uint32_t* count_out
+        float* scores_out
     );
 
-    // Compute weighted sum of values
-    // scores: [count] float  →  output: [head_dim] float
     void attention_weighted_sum(
         uint32_t layer, uint32_t head,
         const float* scores,
@@ -55,50 +51,63 @@ public:
         uint32_t count
     );
 
-    uint32_t size()       const { return cached_positions_; }
-    uint32_t capacity()   const { return max_positions_; }
+    uint32_t size() const { return total_stored_; }
     void clear();
-
     size_t memory_usage() const;
 
 private:
-    // Per-head storage: two flat arrays for K and V int8 data
-    struct HeadStorage {
-        std::vector<int8_t> keys;    // [max_pos * head_dim]
-        std::vector<int8_t> values;  // [max_pos * head_dim]
-        std::vector<float>  k_scales; // per-position
-        std::vector<float>  v_scales;
-        uint32_t count = 0;
-        uint32_t head_dim;
+    struct HeadCache {
+        // Sink
+        std::vector<int8_t> sink_k;
+        std::vector<int8_t> sink_v;
+        std::vector<float>  sink_k_scale;
+        std::vector<float>  sink_v_scale;
+        uint32_t sink_count = 0;
 
-        void resize(uint32_t max_pos, uint32_t hd) {
-            head_dim = hd;
-            keys.resize(max_pos * hd, 0);
-            values.resize(max_pos * hd, 0);
-            k_scales.resize(max_pos, 1.0f);
-            v_scales.resize(max_pos, 1.0f);
-        }
-    };
+        // Window (circular)
+        std::vector<int8_t> win_k;
+        std::vector<int8_t> win_v;
+        std::vector<float>  win_k_scale;
+        std::vector<float>  win_v_scale;
+        std::vector<uint32_t> win_pos;
+        uint32_t win_head = 0;
+        uint32_t win_count = 0;
 
-    struct LayerStorage {
-        std::vector<HeadStorage> heads;
+        // Pooled history
+        std::vector<int8_t> pool_k;
+        std::vector<int8_t> pool_v;
+        std::vector<float>  pool_k_scale;
+        std::vector<float>  pool_v_scale;
+        std::vector<uint32_t> pool_start;
+        std::vector<uint32_t> pool_end;
+        uint32_t pool_count = 0;
+
+        // Accumulator for current pool block
+        std::vector<double> acc_k;
+        std::vector<double> acc_v;
+        uint32_t acc_count = 0;
+        uint32_t acc_start = 0;
+        uint32_t head_dim = 0;
+
+        void init(uint32_t hd, uint32_t ws, uint32_t ps);
+        void store_sink(const float* key, const float* value, uint32_t pos,
+                        uint32_t sink_sz);
+        void store_window(const float* key, const float* value, uint32_t pos,
+                          uint32_t ws);
+        void evict_and_pool(uint32_t pool_block);
+        void finalize_pool_block();
     };
 
     KVCacheConfig cfg_;
-    uint32_t max_positions_;
-    uint32_t cached_positions_ = 0;
-    uint32_t n_sinks_;
-    std::vector<LayerStorage> layers_;
+    uint32_t window_sz_;
+    uint32_t pool_block_;
+    uint32_t total_stored_ = 0;
+    std::vector<std::vector<HeadCache>> layers_;
 
-    // Quantize row to int8
     void quantize_row(const float* src, int8_t* dst, float* scale_out, uint32_t n) const;
-    // Single dequantized dot product: query_float × key_int8
-    float dot_product_quantized(const float* query, const int8_t* key, float scale, uint32_t n) const;
-    // Weighted sum: sum(score_i * value_i_int8) then dequant
-    void weighted_sum_quantized(const float* scores, const int8_t* values,
-                                const float* v_scales, float* output,
-                                uint32_t count, uint32_t head_dim) const;
+    float dot_quant(const float* q, const int8_t* kv, float s, uint32_t n) const;
+    float dot_product_quantized(const float* q, const int8_t* kv, float s, uint32_t n) const;
 };
 
 } // namespace forge
-#endif // FORGE_KV_CACHE_HPP
+#endif

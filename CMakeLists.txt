@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(PocketForge VERSION 1.0.0 LANGUAGES CXX C)
+project(PocketForge VERSION 1.1.0 LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -42,7 +42,19 @@ else()
     add_compile_options(-O3 -march=native)
 endif()
 
+# Add debugging for NEON detection
+message(STATUS "Host processor: ${CMAKE_SYSTEM_PROCESSOR}")
+
 add_compile_options(-Wall -Wextra -Wno-unused-parameter -flto)
+
+# Android NDK toolchain detection
+if(ANDROID OR CMAKE_ANDROID_ARCH_ABI)
+    message(STATUS "Android build detected (${CMAKE_ANDROID_ARCH_ABI})")
+    if(CMAKE_ANDROID_ARCH_ABI MATCHES "armeabi-v7a")
+        add_compile_definitions(FORGE_ARM32_NEON=1)
+        message(STATUS "ARM32 NEON enabled for Android")
+    endif()
+endif()
 
 # Core library
 file(GLOB FORGE_SRC src/*.cpp)

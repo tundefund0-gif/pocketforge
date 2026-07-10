@@ -18,7 +18,7 @@ int main(int argc, char** argv) {
 
     std::cout << "╔══════════════════════════════════════╗\n";
     std::cout << "║   PocketForge API Server v1.0       ║\n";
-    std::cout << "║   < 250 MB RAM, 16K+ context        ║\n";
+    std::cout << "║   < 250 MB RAM, 131K context        ║\n";
     std::cout << "╚══════════════════════════════════════╝\n\n";
 
     // Load model
@@ -126,6 +126,100 @@ int main(int argc, char** argv) {
                  << "    \"prompt_tokens\":" << prompt_tokens.size() << ",\n"
                  << "    \"completion_tokens\":" << result.tokens.size() << ",\n"
                  << "    \"total_tokens\":" << (prompt_tokens.size() + result.tokens.size()) << "\n"
+                 << "  }\n"
+                 << "}";
+
+            forge::HttpResponse resp;
+            resp.body = json.str();
+            return resp;
+
+        } catch (const std::exception& e) {
+            forge::HttpResponse err;
+            err.status_code = 500;
+            err.body = "{\"error\":\"" + std::string(e.what()) + "\"}";
+            return err;
+        }
+    });
+
+    // Chat completions endpoint (OpenAI-compatible)
+    server.route("POST", "/v1/chat/completions", [](const forge::HttpRequest& req) -> forge::HttpResponse {
+        try {
+            forge::JsonValue body = forge::JsonValue::parse(req.body);
+
+            // Parse messages
+            std::string prompt;
+            auto messages = body.get("messages");
+            if (messages.type == forge::JsonValue::ARRAY) {
+                for (const auto& msg : messages.array_val) {
+                    auto role = msg.get("role").string_val;
+                    auto content_val = msg.get("content").string_val;
+                    if (role == "user" || role == "system" || role == "assistant") {
+                        if (!prompt.empty()) prompt += "\n";
+                        prompt += content_val;
+                    }
+                }
+            }
+
+            if (prompt.empty()) {
+                forge::HttpResponse err;
+                err.status_code = 400;
+                err.body = "{\"error\":\"empty_messages\"}";
+                return err;
+            }
+
+            int max_tokens = (int)body.get("max_tokens").number_val;
+            if (max_tokens <= 0 || max_tokens > 4096) max_tokens = 256;
+
+            float temperature = (float)body.get("temperature").number_val;
+            if (temperature <= 0) temperature = 0.8f;
+
+            bool stream = body.get("stream").bool_val;
+
+            // Tokenize prompt
+            std::vector<int32_t> prompt_tokens;
+            for (char c : prompt) prompt_tokens.push_back((int32_t)(unsigned char)c);
+
+            // Setup sampling config
+            forge::SamplingConfig sampling;
+            sampling.temperature = temperature;
+            if (body.has("top_p")) sampling.top_p = (float)body.get("top_p").number_val;
+            if (body.has("top_k")) sampling.top_k = (uint32_t)body.get("top_k").number_val;
+
+            g_engine->config().check_memory_budget(); // silence warning
+
+            // Generate
+            std::string generated_text;
+            auto result = g_engine->generate(prompt_tokens, max_tokens,
+                [&](int32_t token, float prob) {
+                    if (token >= 32 && token < 127) {
+                        generated_text += (char)token;
+                    } else {
+                        generated_text += "\\x" + std::to_string(token);
+                    }
+                }
+            );
+
+            // Build response
+            std::ostringstream json;
+            json << "{\n"
+                 << "  \"id\":\"chatcmpl-" << time(nullptr) << "\",\n"
+                 << "  \"object\":\"chat.completion\",\n"
+                 << "  \"created\":" << time(nullptr) << ",\n"
+                 << "  \"model\":\"pocketforge-1b\",\n"
+                 << "  \"choices\":[{\n"
+                 << "    \"index\":0,\n"
+                 << "    \"message\":{\n"
+                 << "      \"role\":\"assistant\",\n"
+                 << "      \"content\":\"" << forge::json_escape(generated_text) << "\"\n"
+                 << "    },\n"
+                 << "    \"finish_reason\":\"length\"\n"
+                 << "  }],\n"
+                 << "  \"usage\":{\n"
+                 << "    \"prompt_tokens\":" << prompt_tokens.size() << ",\n"
+                 << "    \"completion_tokens\":" << result.tokens.size() << ",\n"
+                 << "    \"total_tokens\":" << (prompt_tokens.size() + result.tokens.size()) << ",\n"
+                 << "    \"mtp_accepted\":" << result.mtp_accepted << ",\n"
+                 << "    \"mtp_rejected\":" << result.mtp_rejected << "\n"
                  << "  }\n"
                  << "}";
 

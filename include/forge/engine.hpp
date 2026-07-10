@@ -31,7 +31,33 @@ public:
         ProgressCallback progress = nullptr
     );
 
+    // Forward returns logits. Stores hidden state internally.
     std::vector<float> forward(const std::vector<int32_t>& tokens);
+
+    // Forward and return both logits and the final hidden state
+    std::vector<float> forward_with_hidden(
+        const std::vector<int32_t>& tokens,
+        std::vector<float>& hidden_out
+    );
+
+    // MTP speculative decode: generate tokens with MTP verification
+    // Returns (accepted_count, last_logits)
+    std::pair<int, std::vector<float>> step_mtp(
+        int32_t current_token,
+        const std::vector<float>& hidden_state,
+        const std::vector<float>& embedding_table,
+        int& mtp_accepted_out,
+        int& mtp_rejected_out
+    );
+
+    // Sampling methods
+    int32_t sample(const float* logits, uint32_t n_vocab,
+                   const SamplingConfig& cfg = SamplingConfig());
+    int32_t sample_greedy(const float* logits, uint32_t n_vocab);
+    int32_t sample_top_k(const float* logits, uint32_t n_vocab,
+                         uint32_t k, float temp);
+    int32_t sample_top_p(const float* logits, uint32_t n_vocab,
+                         float p, float temp);
 
     struct MemoryStats {
         size_t weights_mmap = 0;
@@ -55,6 +81,14 @@ private:
     std::unique_ptr<MTPHeads> mtp_;
     std::unique_ptr<LayerSkipController> skipper_;
 
+    // Embedding table (tied, shared with unembed)
+    std::vector<float> embedding_table_;
+    bool embeddings_loaded_ = false;
+
+    // Last hidden state from forward pass
+    std::vector<float> last_hidden_;
+    bool hidden_valid_ = false;
+
     // Pre-allocated buffers (never freed during runtime)
     std::vector<float> hidden_state_;
     std::vector<float> residual_;
@@ -65,6 +99,11 @@ private:
     std::vector<float> k_buf_;
     std::vector<float> v_buf_;
     std::vector<float> scores_;  // attention scores buffer
+    std::vector<float> attn_scores_out_;
+
+    // MTP buffers
+    std::vector<float> verify_hidden_;
+    std::vector<float> verify_logits_;
 
     void compute_attention(uint32_t layer_id, const float* input, float* output,
                            uint32_t token_pos);
@@ -72,6 +111,7 @@ private:
     const int8_t* load_weight_block(uint32_t layer_id, uint32_t matrix_id,
                                      float* scale_out);
     int32_t sample_token(const float* logits, uint32_t n_vocab);
+    void generate_placeholder_logits(int32_t token, float* logits, uint32_t n_vocab);
 };
 
 } // namespace forge
