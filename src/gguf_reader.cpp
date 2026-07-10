@@ -128,9 +128,7 @@ bool GGUFFile::open(const std::string& path) {
     for (uint64_t i = 0; i < n_metadata_; i++) {
         std::string key = read_string(offset);
 
-        auto type_p = ptr_at<uint32_t>(offset); offset += sizeof(uint32_t);
-        if (!type_p) break;
-        GGUFValueType val_type = static_cast<GGUFValueType>(*type_p);
+        GGUFValueType val_type = static_cast<GGUFValueType>(read_at<uint32_t>(offset)); offset += sizeof(uint32_t);
 
         switch (val_type) {
             case GGUF_TYPE_UINT8: {
@@ -155,8 +153,7 @@ bool GGUFFile::open(const std::string& path) {
                 metadata_float_[key] = read_at<float>(offset); offset += sizeof(float); break;
             }
             case GGUF_TYPE_BOOL: {
-                auto v = ptr_at<bool>(offset); offset += sizeof(bool);
-                if (v) metadata_int_[key] = *v ? 1 : 0; break;
+                metadata_int_[key] = read_at<bool>(offset) ? 1 : 0; offset += sizeof(bool); break;
             }
             case GGUF_TYPE_STRING: {
                 std::string val = read_string(offset);
@@ -172,15 +169,13 @@ bool GGUFFile::open(const std::string& path) {
                 break;
             }
             case GGUF_TYPE_UINT64: {
-                auto v = ptr_at<uint64_t>(offset); offset += sizeof(uint64_t);
-                if (v) metadata_int_[key] = (int64_t)*v; break;
+                metadata_int_[key] = (int64_t)read_at<uint64_t>(offset); offset += sizeof(uint64_t); break;
             }
             case GGUF_TYPE_INT64: {
                 metadata_int_[key] = read_at<int64_t>(offset); offset += sizeof(int64_t); break;
             }
             case GGUF_TYPE_FLOAT64: {
-                auto v = ptr_at<double>(offset); offset += sizeof(double);
-                if (v) metadata_float_[key] = (float)*v; break;
+                metadata_float_[key] = (float)read_at<double>(offset); offset += sizeof(double); break;
             }
             default:
                 break;
@@ -234,12 +229,12 @@ bool GGUFFile::open(const std::string& path) {
 }
 
 std::string GGUFFile::read_string(size_t& offset) const {
-    auto len_p = ptr_at<uint64_t>(offset); offset += sizeof(uint64_t);
-    if (!len_p) return "";
-    uint64_t len = *len_p;
-    auto data_p = ptr_at<char>(offset); offset += len;
-    if (!data_p) return "";
-    return std::string(data_p, len);
+    uint64_t len = read_at<uint64_t>(offset); offset += sizeof(uint64_t);
+    if (offset + len > mmap_size_ || len > 1048576) return "";
+    const char* data_p = (const char*)mmap_addr_ + offset;
+    std::string result(data_p, (size_t)len);
+    offset += len;
+    return result;
 }
 
 bool GGUFFile::skip_value(size_t& offset, GGUFValueType type) const {
