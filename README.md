@@ -104,7 +104,7 @@ pkg install build-essential cmake zstd python python-pip
 
 ```bash
 # Clone
-git clone https://github.com/tundefund0-git/pocketforge.git
+git clone https://github.com/tundefund0-gif/pocketforge.git
 cd pocketforge
 
 # Configure
